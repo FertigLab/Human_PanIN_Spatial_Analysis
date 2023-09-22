@@ -1,0 +1,39 @@
+---
+title: "18_A_TLS_Domino_Prep"
+author: "Jacob Mitchell"
+date: "2023-03-21"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(Seurat)
+library(loomR)
+library(dplyr)
+
+set.seed(123)
+sessionInfo()
+```
+
+```{r}
+result_dir <- "processed_data/18_A_TLS_domino_preprocessing"
+if(!dir.exists(result_dir)){
+  dir.create(result_dir)
+}
+```
+
+```{r}
+seurat <- readRDS("processed_data/15_A_Picking_Neighbor_Spots/TLS_adjacent_spots.rds")
+```
+
+```{r}
+mat <- as.matrix(seurat@assays$Spatial@counts)
+loom <- create(filename = paste0(result_dir, "/TLS_neighbors_counts.loom"),
+               data = mat)
+loom$close_all()
+```
+
+

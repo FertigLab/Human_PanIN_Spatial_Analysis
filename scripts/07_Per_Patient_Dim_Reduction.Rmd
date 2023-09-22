@@ -1,0 +1,320 @@
+---
+title: "07_Per_Patient_Dim_Reduction"
+author: "Jacob Mitchell"
+date: "2022-12-20"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r Load Packages}
+library(Seurat)
+library(ggplot2)
+library(grid)
+library(gridExtra)
+library(colorRamps)
+
+# Python Environment
+library(reticulate)
+use_condaenv(condaenv = "panin_visium")
+# leidenalg version 0.8.10
+
+sessionInfo()
+```
+
+```{r Data Directory to Load From}
+data_dir <- "processed_data/06_Identify_Pt_VarGenes"
+```
+
+```{r Create Results Directories}
+result_dir <- "processed_data/07_Per_Patient_Dim_Reduction"
+if(!dir.exists(result_dir)){
+  dir.create(result_dir)
+}
+
+figure_dir <- "figures/07_Per_Patient_Dim_Reduction"
+if(!dir.exists(figure_dir)){
+  dir.create(figure_dir)
+}
+```
+
+```{r Custom Functions}
+# save plot as 6" x 6" pdf
+plot_save_pdf <- function(plot, filename){
+  ggsave(plot = plot,
+         filename = paste0(filename),
+         width = unit(6, "in"), height = unit(6, "in"))
+}
+
+# plot clustering and quality information on low-dim representations of the data
+plot_low_dim <- function(seurat, group_by, filepath, subject_name, show = TRUE){
+  for(g in group_by){
+    pal <- colorRamps::matlab.like2(length(unique(seurat@meta.data[[g]])))
+    
+    # PCA plots
+    pca_plot <-
+      DimPlot(seurat, group.by = g, reduction = "pca") +
+      # scale_color_manual(values = pal) +
+      ggtitle(paste0(subject_name, " : ", g))
+    
+    # UMAP plots
+    umap_plot <-
+      DimPlot(seurat, group.by = g, reduction = "umap") +
+      # scale_color_manual(values = pal) +
+      ggtitle(paste0(subject_name, " : ", g))
+    
+    if(show){
+      print(pca_plot)
+      print(umap_plot)
+    }
+    
+    plot_save_pdf(plot = pca_plot,
+                  filename = paste0(figure_dir, "/", subject_name,
+                                    "_pca_", g, ".pdf"))
+    plot_save_pdf(plot = umap_plot,
+                  filename = paste0(figure_dir, "/", subject_name,
+                                    "_umap_", g, ".pdf"))
+  }
+}
+```
+
+```{r Subject 01}
+seurat <- readRDS(paste0(data_dir, "/subject_01_VarFeatures.rds"))
+
+# remove old clustering meta data from clustering by segment
+removed_clustering <- c(
+  "SCT_snn_res.0.8", "seurat_clusters", "Leiden_clusters"
+)
+seurat@meta.data <- 
+  seurat@meta.data[, !colnames(seurat@meta.data) %in% removed_clustering]
+
+# Scale expression of all genes
+seurat <- ScaleData(seurat, features = rownames(seurat), assay = "SCT")
+
+# PCA dimensionality reduction
+seurat <- RunPCA(seurat, assay = "SCT")
+elbow_plot <- ElbowPlot(seurat, ndims = 50)
+print(elbow_plot)
+
+# Number of principal components used for downstream analysis
+n_PCs <- 25
+
+# Identify neighborhoods and Leiden clusters
+seurat <- FindNeighbors(seurat, reduction = "pca", dims = 1:n_PCs)
+
+# Find clusters with Leiden Clustering
+# Warnings are silenced for legibility of knitted script
+# All pertain coercion to NA's because of handling data from R in python syntax
+suppressWarnings(
+  seurat <- FindClusters(seurat, algorithm = 4, resolution = 0.8)
+)
+
+## Warning in paste("reticulate", module, "load", sep = "::"): NAs introduced by
+## coercion to integer range
+
+# UMAP low-dimension representation
+seurat <- RunUMAP(seurat, reduction = "pca", dims = 1:n_PCs)
+
+# Assess Low-dim plots
+plot_low_dim(seurat,
+             group_by = c("segment", "cell_type_confirmed", "seurat_clusters"),
+             filepath = figure_dir,
+             subject_name = "Subject_01")
+
+# Save object with reduced-dim embeddings and cluster assignments
+saveRDS(seurat,
+        file = paste0(result_dir, "/subject_01_DimReduced.rds"))
+```
+
+```{r Subject 02}
+seurat <- readRDS(paste0(data_dir, "/subject_02_VarFeatures.rds"))
+
+# remove old clustering meta data from clustering by segment
+removed_clustering <- c(
+  "SCT_snn_res.0.8", "seurat_clusters", "Leiden_clusters"
+)
+seurat@meta.data <- 
+  seurat@meta.data[, !colnames(seurat@meta.data) %in% removed_clustering]
+
+# Scale expression of all genes
+seurat <- ScaleData(seurat, features = rownames(seurat), assay = "SCT")
+
+# PCA dimensionality reduction
+seurat <- RunPCA(seurat, assay = "SCT")
+elbow_plot <- ElbowPlot(seurat, ndims = 50)
+print(elbow_plot)
+
+# Number of principal components used for downstream analysis
+n_PCs <- 20
+
+# Identify neighborhoods and Leiden clusters
+seurat <- FindNeighbors(seurat, reduction = "pca", dims = 1:n_PCs)
+
+# Find clusters with Leiden Clustering
+# Warnings are silenced for legibility of knitted script
+# All pertain coercion to NA's because of handling data from R in python syntax
+suppressWarnings(
+  seurat <- FindClusters(seurat, algorithm = 4, resolution = 0.8)
+)
+
+## Warning in paste("reticulate", module, "load", sep = "::"): NAs introduced by
+## coercion to integer range
+
+# UMAP low-dimension representation
+seurat <- RunUMAP(seurat, reduction = "pca", dims = 1:n_PCs)
+
+# Assess Low-dim plots
+plot_low_dim(seurat,
+             group_by = c("segment", "cell_type_confirmed", "seurat_clusters"),
+             filepath = figure_dir,
+             subject_name = "Subject_02")
+
+# Save object with reduced-dim embeddings and cluster assignments
+saveRDS(seurat,
+        file = paste0(result_dir, "/subject_02_DimReduced.rds"))
+```
+
+```{r Subject 03}
+seurat <- readRDS(paste0(data_dir, "/subject_03_VarFeatures.rds"))
+
+# remove old clustering meta data from clustering by segment
+removed_clustering <- c(
+  "SCT_snn_res.0.8", "seurat_clusters", "Leiden_clusters"
+)
+seurat@meta.data <- 
+  seurat@meta.data[, !colnames(seurat@meta.data) %in% removed_clustering]
+
+# Scale expression of all genes
+seurat <- ScaleData(seurat, features = rownames(seurat), assay = "SCT")
+
+# PCA dimensionality reduction
+seurat <- RunPCA(seurat, assay = "SCT")
+elbow_plot <- ElbowPlot(seurat, ndims = 50)
+print(elbow_plot)
+
+# Number of principal components used for downstream analysis
+n_PCs <- 20
+
+# Identify neighborhoods and Leiden clusters
+seurat <- FindNeighbors(seurat, reduction = "pca", dims = 1:n_PCs)
+
+# Find clusters with Leiden Clustering
+# Warnings are silenced for legibility of knitted script
+# All pertain coercion to NA's because of handling data from R in python syntax
+suppressWarnings(
+  seurat <- FindClusters(seurat, algorithm = 4, resolution = 0.8)
+)
+
+## Warning in paste("reticulate", module, "load", sep = "::"): NAs introduced by
+## coercion to integer range
+
+# UMAP low-dimension representation
+seurat <- RunUMAP(seurat, reduction = "pca", dims = 1:n_PCs)
+
+# Assess Low-dim plots
+plot_low_dim(seurat,
+             group_by = c("segment", "cell_type_confirmed", "seurat_clusters"),
+             filepath = figure_dir,
+             subject_name = "Subject_03")
+
+# Save object with reduced-dim embeddings and cluster assignments
+saveRDS(seurat,
+        file = paste0(result_dir, "/subject_03_DimReduced.rds"))
+```
+
+```{r Subject 04}
+seurat <- readRDS(paste0(data_dir, "/subject_04_VarFeatures.rds"))
+
+# remove old clustering meta data from clustering by segment
+removed_clustering <- c(
+  "SCT_snn_res.0.8", "seurat_clusters", "Leiden_clusters"
+)
+seurat@meta.data <- 
+  seurat@meta.data[, !colnames(seurat@meta.data) %in% removed_clustering]
+
+# Scale expression of all genes
+seurat <- ScaleData(seurat, features = rownames(seurat), assay = "SCT")
+
+# PCA dimensionality reduction
+seurat <- RunPCA(seurat, assay = "SCT")
+elbow_plot <- ElbowPlot(seurat, ndims = 50)
+print(elbow_plot)
+
+# Number of principal components used for downstream analysis
+n_PCs <- 20
+
+# Identify neighborhoods and Leiden clusters
+seurat <- FindNeighbors(seurat, reduction = "pca", dims = 1:n_PCs)
+
+# Find clusters with Leiden Clustering
+# Warnings are silenced for legibility of knitted script
+# All pertain coercion to NA's because of handling data from R in python syntax
+suppressWarnings(
+  seurat <- FindClusters(seurat, algorithm = 4, resolution = 0.8)
+)
+
+## Warning in paste("reticulate", module, "load", sep = "::"): NAs introduced by
+## coercion to integer range
+
+# UMAP low-dimension representation
+seurat <- RunUMAP(seurat, reduction = "pca", dims = 1:n_PCs)
+
+# Assess Low-dim plots
+plot_low_dim(seurat,
+             group_by = c("segment", "cell_type_confirmed", "seurat_clusters"),
+             filepath = figure_dir,
+             subject_name = "Subject_04")
+
+# Save object with reduced-dim embeddings and cluster assignments
+saveRDS(seurat,
+        file = paste0(result_dir, "/subject_04_DimReduced.rds"))
+```
+
+```{r Subject 05}
+seurat <- readRDS(paste0(data_dir, "/subject_05_VarFeatures.rds"))
+
+# remove old clustering meta data from clustering by segment
+removed_clustering <- c(
+  "SCT_snn_res.0.8", "seurat_clusters", "Leiden_clusters"
+)
+seurat@meta.data <- 
+  seurat@meta.data[, !colnames(seurat@meta.data) %in% removed_clustering]
+
+# Scale expression of all genes
+seurat <- ScaleData(seurat, features = rownames(seurat), assay = "SCT")
+
+# PCA dimensionality reduction
+seurat <- RunPCA(seurat, assay = "SCT")
+elbow_plot <- ElbowPlot(seurat, ndims = 50)
+print(elbow_plot)
+
+# Number of principal components used for downstream analysis
+n_PCs <- 25
+
+# Identify neighborhoods and Leiden clusters
+seurat <- FindNeighbors(seurat, reduction = "pca", dims = 1:n_PCs)
+
+# Find clusters with Leiden Clustering
+# Warnings are silenced for legibility of knitted script
+# All pertain coercion to NA's because of handling data from R in python syntax
+suppressWarnings(
+  seurat <- FindClusters(seurat, algorithm = 4, resolution = 0.8)
+)
+## Warning in paste("reticulate", module, "load", sep = "::"): NAs introduced by
+## coercion to integer range
+
+# UMAP low-dimension representation
+seurat <- RunUMAP(seurat, reduction = "pca", dims = 1:n_PCs)
+
+# Assess Low-dim plots
+plot_low_dim(seurat,
+             group_by = c("segment", "cell_type_confirmed", "seurat_clusters"),
+             filepath = figure_dir,
+             subject_name = "Subject_05")
+
+# Save object with reduced-dim embeddings and cluster assignments
+saveRDS(seurat,
+        file = paste0(result_dir, "/subject_05_DimReduced.rds"))
+```

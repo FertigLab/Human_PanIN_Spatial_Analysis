@@ -1,0 +1,384 @@
+---
+title: "19_Novel_CoGAPS_PatternMarkers"
+author: "Jacob Mitchell"
+date: "2023-06-02"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(Seurat)
+library(CoGAPS)
+library(tidyverse)
+library(msigdbr)
+library(geneset)
+library(fgsea)
+library(stringr)
+library(ggplot2)
+library(ComplexHeatmap)
+library(scales)
+
+set.seed(123)
+sessionInfo()
+```
+
+```{r Novel PatternMarker Statistic}
+# developed by Atul Deshpande
+newPatternMarkers <- function(object, data = NULL, fdrThresh = 5e-2, cutoff = 0.2, sanityCheck = c("correlation","ratio"))
+{
+  patternList <- colnames(object@featureLoadings)
+  N <- length(patternList)
+  geneList <- rownames(object@featureLoadings)
+  
+  if (is.null(fdrThresh)) fdrThresh <- 1/length(geneList)
+  
+  ## get total gene expression in each pattern
+  totalGeneExprFromPattern <- object@featureLoadings %*% diag(colSums(object@sampleFactors))
+  rownames(totalGeneExprFromPattern) <- geneList
+  colnames(totalGeneExprFromPattern) <- patternList
+  
+  ## total gene expression in the cogaps approximate A*P
+  totalGeneExprfromCoGAPS <- apply(totalGeneExprFromPattern,1,sum)
+  markerGenes <- geneList
+  if (!is.null(data)){
+    data <- as.matrix(data)
+    if (sanityCheck=="ratio"){
+        totalGeneExprData <- apply(data[markerGenes,],1,sum)  
+        niceGenes <- names(which(abs(totalGeneExprfromCoGAPS/totalGeneExprData-1) < cutoff))
+    }  else if (sanityCheck=="correlation"){
+        cogapsMat <- object@featureLoadings %*% t(object@sampleFactors)  
+        exprCorrelation <- sapply(rownames(cogapsMat),function(i) cor(cogapsMat[i,],data[i,]))
+        niceGenes <- names(which(exprCorrelation > cutoff))
+    }
+    markerGenes <- niceGenes
+  }
+  
+  
+  ## calculate marker scores as fraction of gene expression in each pattern
+  markerScores <- totalGeneExprFromPattern[markerGenes,]/totalGeneExprfromCoGAPS[markerGenes]
+
+  ## use mixtools to group genes into three groups - low, mid and high expression
+  mixGeneExpr <- mixtools::normalmixEM(totalGeneExprfromCoGAPS[markerGenes],lambda = c(0.3,0.6,0.1),mu = c(1,50,500), sigma = c(10,50,500))
+  exprLevels<- apply(mixGeneExpr$posterior,1,which.max)
+  names(exprLevels) <- markerGenes
+  
+  ## find mixtures of three distributions of the fractional expression for each expression level
+  ## low expression
+  lowMix <- mixtools::normalmixEM(markerScores[which(exprLevels==1),],lambda = c(0.6,0.3,0.1),mean.constr = c(0,1/length(patternList),NA), sigma = c(.1/N,.5/N,.3))
+  lowScores <- matrix(lowMix$posterior[,3], nrow = sum(exprLevels==1))
+  rownames(lowScores) <- names(which(exprLevels==1))
+  ## mid expression
+  midMix <- mixtools::normalmixEM(markerScores[which(exprLevels==2),],lambda = c(0.6,0.3,0.1),mean.constr = c(0,1/length(patternList),NA), sigma = c(.1/N,.5/N,.3))
+  midScores <- matrix(midMix$posterior[,3], nrow = sum(exprLevels==2))
+  rownames(midScores) <- names(which(exprLevels==2))
+  ## high expression
+  highMix <- mixtools::normalmixEM(markerScores[which(exprLevels==3),],lambda = c(0.6,0.3,0.1),mean.constr = c(0,1/N,NA), sigma = c(.1/N,.5/N,.3))
+  highScores <- matrix(highMix$posterior[,3], nrow = sum(exprLevels==3))
+  rownames(highScores) <- names(which(exprLevels==3))
+
+  mixScores <- rbind(lowScores,midScores,highScores)
+  colnames(mixScores) <- patternList
+  
+  ## calculate outlier threshold for each expression level
+  means <- c(lowMix$mu[2],midMix$mu[2],highMix$mu[2])
+  means <- means[exprLevels]
+  stds <- c(lowMix$sigma[2],midMix$sigma[2],highMix$sigma[2])
+  stds <- stds[exprLevels]
+  score_minus_means <- markerScores - means
+  zscores <- score_minus_means/stds
+  pVals <- 1-pnorm(zscores)
+  qVals <- qvalue::qvalue(pVals, pi0 = 1)
+  qVals <- qVals$qvalues
+  thresholds <- c(lowMix$mu[2]+3*lowMix$sigma[2],midMix$mu[2]+3*midMix$sigma[2],highMix$mu[2]+3*highMix$sigma[2])
+  markerThresholds <- thresholds[exprLevels]
+  
+  ## assign markers to patterns
+  #markersByPattern <- lapply(patternList,function(pattern) names(which(markerScores[,pattern]>markerThresholds)))
+  markersByPattern <- lapply(patternList,function(pattern) names(which(qVals[,pattern]<fdrThresh)))
+  names(markersByPattern) <- patternList    
+  
+  ## order by markerScores
+  #markersByPattern <- lapply(names(markersByPattern),function(pattern) markersByPattern[[pattern]][order(markerScores[markersByPattern[[pattern]],pattern],decreasing = T)])
+  ## order by qValues
+  markersByPattern <- lapply(names(markersByPattern),function(pattern) markersByPattern[[pattern]][order(qVals[markersByPattern[[pattern]],pattern])])
+  names(markersByPattern) <- patternList    
+  
+  return(list(
+    "PatternMarkers"=markersByPattern,
+    "PatternMarkerScores"=markerScores,
+    "PatternMixScores"=mixScores,
+    "markerExprLevels"=exprLevels
+  ))
+}
+
+patternSpotter <- function(obj, locs, geneList = NULL, spotIndices = NULL, patternList = NULL, threshold = 1, plotTitle = "Generic title", radius = 2, lwd = 0, groups = NA, colors_arr = NULL)
+{
+    if ("array" %in% class(obj)) {
+        spotFE <- obj
+        if (is.null(patternList)) patternList <- colnames(obj)
+        present <- apply(spotFE,1,sum)>threshold
+        if (is.null(colors_arr)) colors_arr <- dittoSeq::dittoColors()[1:length(patternList)]
+        if (length(patternList)<ncol(spotFE))
+        {
+            spotFE <- cbind(spotFE[,patternList], Others = apply(spotFE[,setdiff(colnames(spotFE),patternList)],1,sum))
+            colors_arr <- c(colors_arr,"#FFFFFF")
+        }   
+        STdeconvolve::vizAllTopics(spotFE[present,], locs[present,],topicCols = colors_arr, r=radius, lwd = lwd, plotTitle = plotTitle, groups = groups)
+        
+    }
+    else {
+        if (is.null(patternList)) patternList <- colnames(obj@featureLoadings)
+        if (is.null(geneList)) geneList <- rownames(obj@featureLoadings)
+        if (is.null(spotIndices)) spotIndices <- rownames(obj@sampleFactors)
+        
+        geneFE <- obj@featureLoadings[geneList,] %*% diag(colSums(obj@sampleFactors[spotIndices,]))
+        geneFE <- geneFE/apply(geneFE,1,sum)
+        colnames(geneFE) <- colnames(obj@featureLoadings)
+        geneFE <- geneFE[,patternList]
+        if (is.null(colors_arr)) colors_arr <- dittoSeq::dittoColors()[1:(length(patternList))]
+        locs <- locs[spotIndices,]
+        spotFE <- obj@sampleFactors[spotIndices,] %*% diag(colSums(obj@featureLoadings[unique(geneList),]))
+        colnames(spotFE) <- colnames(obj@featureLoadings)
+        if (length(patternList)<length(obj@featureLoadings))
+        {
+            spotFE <- cbind(spotFE[,patternList], Others = apply(spotFE[,setdiff(colnames(spotFE),patternList)],1,sum))
+            colors_arr <- c(colors_arr,"#FFFFFF")
+        }   
+        present <- apply(spotFE,1,sum)>threshold
+        STdeconvolve::vizAllTopics(spotFE[present,], locs[present,],topicCols = colors_arr, r=radius, lwd = lwd, plotTitle = plotTitle, groups = groups)
+    }
+    
+}
+
+pattern_marker_query_heatmap <-
+  function(cogapsResult, patternMarkersResult, query_genes, scale = TRUE){
+    # limit query to genes in patternMarkersResult
+    missing_genes <- query_genes[
+      !query_genes %in% rownames(patternMarkersResult$PatternMarkerScores)]
+    query_genes <- query_genes[!query_genes %in% missing_genes]
+    query_genes <- unique(query_genes)
+    
+    # amplitude matrix as heatmap values
+    A_mat <- cogapsResult@featureLoadings[query_genes,,drop=FALSE]
+    if(scale){A_mat <- t(scale(t(A_mat)))}
+    
+    pattern_names <- factor(names(patternMarkersResult$PatternMarkers),
+                            levels = paste0("Pattern_",
+                                            1:length(names(patternMarkersResult$PatternMarkers))))
+    marker_mat <- NULL
+    for(p in pattern_names){
+      marker <- sapply(query_genes, 
+                       FUN = function(x){
+                         if(x %in% patternMarkersResult$PatternMarkers[[p]]){
+                           return("x")
+                           } else {return("")}
+                         })
+      marker_mat <- cbind(marker_mat, marker)
+    }
+    colnames(marker_mat) <- pattern_names
+    
+    pat_pal <- hue_pal()(length(colnames(A_mat)))
+    names(pat_pal) <- colnames(A_mat)
+    
+    pat_anno <- columnAnnotation(
+      pattern = pattern_names,
+      col = list(pattern = pat_pal)
+    )
+    
+    # col_fun = colorRamp2(c(0, max(A_mat)), c("white", "red"))
+    col_fun = viridis_pal(option = "viridis")(max(A_mat))
+    color_threshold <- max(A_mat)/2
+    
+    hmap <- Heatmap(A_mat,
+            cluster_columns = FALSE,
+            top_annotation = pat_anno,
+            name = ifelse(scale, "Scaled\nGene\nAmplitude", "Gene\nAmplitude"),
+            col = col_fun,
+            cell_fun = function(j, i, x, y, w, h, col) { # add text to each grid
+              grid.text(marker_mat[i, j], x, y, 
+                        gp = gpar(col = ifelse(A_mat[i,j] > color_threshold, "black", "white"), fontface = "bold"))
+              })
+    draw(hmap)
+  }
+
+```
+
+```{r}
+hallmark_gene_sets <- 
+  msigdbr(
+    species = "Homo sapiens",
+    category = "H")
+
+hallmark_list <- split(x = hallmark_gene_sets$gene_symbol,
+                       f = hallmark_gene_sets$gs_name)
+
+gomf_gene_sets <-
+  msigdbr(
+    species = "Homo sapiens",
+    category = "C5",
+    subcategory = "GO:MF")
+gomf_list <- split(x = gomf_gene_sets$gene_symbol,
+                   f = gomf_gene_sets$gs_name)
+
+gobp_gene_sets <-
+  msigdbr(
+    species = "Homo sapiens",
+    category = "C5",
+    subcategory = "GO:BP")
+gobp_list <- split(x = gobp_gene_sets$gene_symbol,
+                   f = gobp_gene_sets$gs_name)
+
+immsig_gene_sets <-
+  msigdbr(
+    species = "Homo sapiens",
+    category = "C7",
+    subcategory = "IMMUNESIGDB")
+immsig_list <- split(x = immsig_gene_sets$gene_symbol,
+                     f = immsig_gene_sets$gs_name)
+
+cellsig_gene_sets <-
+  msigdbr(
+    species = "Homo sapiens",
+    category = "C8")
+cellsig_list <- split(x = cellsig_gene_sets$gene_symbol,
+                      f = cellsig_gene_sets$gs_name)
+
+# KEGG pathways
+kegg_gene_sets <-
+  msigdbr(
+    species = "Homo sapiens",
+    category = "C2",
+    subcategory = "CP:KEGG")
+kegg_list <- split(x = kegg_gene_sets$gene_symbol,
+                   f = kegg_gene_sets$gs_name)
+
+```
+
+```{r}
+result_dir <- "processed_data/19_Novel_CoGAPS_PatternMarkers"
+if(!dir.exists(result_dir)){
+  dir.create(result_dir)
+}
+
+figure_dir <- "figures/19_Novel_CoGAPS_PatternMarkers"
+if(!dir.exists(figure_dir)){
+  dir.create(figure_dir)
+}
+```
+
+```{r}
+seurat <- readRDS("processed_data/15_A_Picking_Neighbor_Spots/all_segments_adjacent_spots.rds")
+cogaps <- readRDS("processed_data/16_B_10_Pattern_TLS_CoGAPS/cogaps_result_10_patterns.rds")
+```
+
+```{r}
+# pattern markers by current marker methods
+pm_orig <- patternMarkers(cogaps)
+# pattern markers by Atul's method
+pm_new <- newPatternMarkers(cogaps)
+```
+
+```{r Pattern 1 markers ranked}
+n_p1_markers <- pm_new$PatternMarkers$Pattern_1
+n_p1_scores <- pm_new$PatternMarkerScores[, "Pattern_1"]
+
+o_p1_markers <- pm_orig$PatternMarkers$Pattern_1
+o_p1_scores <- pm_orig$PatternMarkerScores[, "Pattern_1"]
+o_p1_ranks <- pm_orig$PatternMarkerRanks[, "Pattern_1"]
+
+head(n_p1_scores[order(n_p1_scores)],50)
+head(o_p1_scores[order(o_p1_scores)],30)
+head(o_p1_ranks[order(o_p1_ranks)],30)
+
+# gene set enrichment for scored pattern markers
+# original pattern markers: lower scores are more associated with the pattern
+# new pattern markers: higher scores are more associated with the pattern
+
+n_hallmark_gsea <- fgsea(pathways = hallmark_list, stats = n_p1_scores, scoreType = "pos")
+n_gomf_gsea <- fgsea(pathways = gomf_list, stats = n_p1_scores, scoreType = "pos")
+n_gobp_gsea <- fgsea(pathways = gobp_list, stats = n_p1_scores, scoreType = "pos")
+n_immsig_gsea <- fgsea(pathways = immsig_list, stats = n_p1_scores, scoreType = "pos")
+n_cellsig_gsea <- fgsea(pathways = cellsig_list, stats = n_p1_scores, scoreType = "pos")
+n_kegg_gsea <- fgsea(pathways = kegg_list, stats = n_p1_scores, scoreType = "pos")
+
+
+o_hallmark_gsea <- fgsea(pathways = hallmark_list, stats = -o_p1_scores, scoreType = "pos")
+o_gomf_gsea <- fgsea(pathways = gomf_list, stats = -o_p1_scores, scoreType = "pos")
+
+# significantly enriched pathways from each method
+n_gomf_gsea_sig <- n_gomf_gsea[n_gomf_gsea$padj < 0.05 & NES > 0,] %>%
+  arrange(padj)
+
+png(filename = paste0(figure_dir, "/gsea_table_", "new_PM_", "Pattern_1", "_", "GOMF", ".png"),
+    width = 12, height = 6, units = "in", res = 300)
+plotGseaTable(pathways = gomf_list[c(n_gomf_gsea_sig$pathway)], 
+              stats = n_p1_scores,
+              fgseaRes = n_gomf_gsea)
+dev.off()
+```
+
+```{r}
+pattern_marker_query_heatmap(
+  cogapsResult = cogaps, patternMarkersResult = pm_new, 
+  query_genes = gomf_list$GOMF_RETINAL_DEHYDROGENASE_ACTIVITY
+)
+```
+
+```{r}
+# find pattern markers among regulons learned by SCENIC analysis
+regulons <- read.csv("processed_data/18_B_TLS_SCENIC/regulons_TLS_neighbors.csv",
+                     skip = 2)
+regulon_colnames <- c("TF", "MotifID", "AUC", "NES", "MotifSimilarityQvalue", "OrthologousIdentity", "Annotation", "Context", "TargetGenes", "RankAtMax")
+colnames(regulons) <- regulon_colnames
+
+# parse gene names from target gene lists
+# all gene names are flanked by apostrophies
+TF_regulons <- list()
+for(i in 1:length(regulons$TF)){
+  tf <- regulons$TF[i]
+  reg_vec <- str_split(regulons[i, c("TargetGenes")], "\\)\\, \\(")
+  TF_regulons[[tf]] <- sapply(reg_vec, function(x){gsub(".*\\'(.+)\\'.*", "\\1", x)})
+}
+
+# identify regulons that have a pattern 1 marker in them
+TF_regulons_pm_p1 <- list()
+for(i in 1:length(TF_regulons)){
+  tf <- names(TF_regulons)[i]
+  TF_regulons_pm_p1[[tf]] <- TF_regulons[[tf]][TF_regulons[[tf]] %in% n_p1_markers]
+}
+
+# data frame of pattern markers comparisons
+p1_regulon_df <- data.frame(
+  "transcription_factor" = names(TF_regulons)
+)
+p1_regulon_df$regulon <- sapply(TF_regulons, function(x){paste(x, collapse = ", ")})
+p1_regulon_df$regulon_size <- sapply(TF_regulons, length)
+p1_regulon_df$Pattern_1_markers <- sapply(TF_regulons_pm_p1, function(x){paste(x, collapse = ", ")})
+p1_regulon_df$pm_proportion <- 
+  sapply(TF_regulons_pm_p1, function(x){length(x)})/p1_regulon_df$regulon_size
+
+# factor ordering for plot
+p1_regulon_df$transcription_factor <- 
+  factor(p1_regulon_df$transcription_factor,
+         levels = p1_regulon_df[order(p1_regulon_df$pm_proportion),]$transcription_factor)
+
+ggplot(p1_regulon_df[p1_regulon_df$pm_proportion > 0.5,], 
+       aes(x = transcription_factor, y = pm_proportion, size = regulon_size)) +
+  geom_point() +
+  theme(axis.text.x = element_text(hjust = 1, vjust = 1, angle = 30))
+
+# limit to transcription factors with at least 5 genes in the regulon
+ggplot(p1_regulon_df[p1_regulon_df$pm_proportion > 0.4 & p1_regulon_df$regulon_size >= 5,], 
+       aes(x = transcription_factor, y = pm_proportion, size = regulon_size)) +
+  geom_point() +
+  theme(axis.text.x = element_text(hjust = 1, vjust = 1, angle = 30))
+
+```
+
+```{r}
+df <- FindMarkers(seurat, group.by = "TLS_lesion", ident.1 = "PDAC_TLS", ident.2 = "CP_TLS")
+```
+

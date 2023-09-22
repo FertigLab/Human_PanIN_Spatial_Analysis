@@ -1,0 +1,825 @@
+---
+title: "09_Immune_Module_Scores"
+author: "Jacob Mitchell"
+date: "2023-01-17"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r Load Packages}
+library(Seurat)
+library(CoGAPS)
+library(Matrix)
+library(dplyr)
+library(ggplot2)
+library(patchwork)
+library(RColorBrewer)
+
+sessionInfo()
+```
+
+```{r Custom Functions}
+plot_save_pdf <- function(plot, filename){
+  ggsave(plot = plot,
+         filename = paste0(filename),
+         width = unit(6, "in"), height = unit(6, "in"))
+}
+
+multiplot_save_pdf <- function(plot, filename){
+  ggsave(plot = plot,
+         filename = paste0(filename),
+         width = unit(12, "in"), height = unit(12, "in"))
+}
+
+calculate_module_scores <- function(seurat, gene_set_list,
+                                    threshold_quantile = 0.75){
+  gs_names <- names(gene_set_list)
+  for(gs in gs_names){
+    seurat <- AddModuleScore(seurat,
+                         features = list(gene_set_list[[gs]]),
+                         name = paste0(gs, "_module_score"))
+    
+    if(!is.null(threshold_quantile)){
+      score_uq <- quantile(seurat@meta.data[[paste0(gs, "_module_score1")]],
+                           probs = threshold_quantile, names = FALSE)
+      seurat@meta.data[[paste0(gs, "_upper_quantile")]] <-
+        sapply(seurat@meta.data[[paste0(gs, "_module_score1")]],
+           FUN = function(x){
+             if(x > score_uq){
+               return(TRUE)
+               }
+             else{
+               return(FALSE)
+               }
+           })
+    }
+  }
+  return(seurat)
+}
+
+spatial_feature_score <- function(seurat, subject_name, module_score,
+                                  figure_path = NULL, show = TRUE,
+                                  multipanel = FALSE){
+  image_names <- Images(seurat)
+  p_list <- list()
+  for(img in image_names){
+    spatial <- SpatialFeaturePlot(seurat, features = module_score, 
+                                  images = img,
+                                  pt.size.factor = 2) +
+        scale_fill_gradientn(
+          colours = rev(brewer.pal(n = 11, name = "Spectral")),
+          limits = 
+            c(min(seurat@meta.data[[module_score]]),
+              max(seurat@meta.data[[module_score]]))
+          ) +
+      ggtitle(label = paste0(img, " : ", module_score)) +
+      theme(legend.position = "bottom")
+    p_list[[img]] <- spatial
+    if(show){print(spatial)}
+    if(!is.null(figure_path)){
+      plot_save_pdf(plot = spatial,
+                    filename = paste0(figure_path, "/", subject_name, "_",
+                                      module_score, "_spatial_", img, ".pdf"))
+    }
+  }
+  if(multipanel & !is.null(figure_path)){
+    if(length(p_list) == 4){
+      multi_plot <- p_list[[1]] + p_list[[2]] + p_list[[3]] + p_list[[4]] +
+        plot_layout(ncol = 2)
+    }
+     if(length(p_list) == 3){
+      multi_plot <- p_list[[1]] + p_list[[2]] + p_list[[3]] + 
+        plot_layout(ncol = 2)
+    }
+    if(show){ print(multi_plot) }
+    multiplot_save_pdf(plot = multi_plot,
+                       filename = paste0(figure_path, "/", subject_name, "_",
+                                         module_score, "_spatial_multiplot.pdf"))
+  }
+}
+
+spatial_dim_upper_score <- function(seurat, subject_name, module_score,
+                                    figure_path = NULL, show = TRUE,
+                                    multipanel = FALSE){
+  uq_name <- gsub("_module_score1", "_upper_quantile", module_score)
+  image_names <- Images(seurat)
+  Idents(seurat) <- seurat@meta.data[[uq_name]]
+  p_list <- list()
+  for(img in image_names){
+    spatial <- SpatialDimPlot(seurat,
+                              images = img,
+                              pt.size.factor = 2) +
+      scale_fill_manual(values = c("TRUE" = "#FFFF00", "FALSE" = "#0000FF")) +
+      ggtitle(label = paste0(img, " : ", uq_name)) +
+      theme(legend.position = "bottom")
+    p_list[[img]] <- spatial
+    if(show){ print(spatial) }
+    if(!is.null(figure_path)){
+      plot_save_pdf(plot = spatial,
+                    filename = paste0(figure_path, "/", subject_name, "_",
+                                      uq_name, "_spatial_", img, ".pdf"))
+    }
+  }
+  if(multipanel & !is.null(figure_path)){
+    if(length(p_list) == 4){
+      multi_plot <- p_list[[1]] + p_list[[2]] + p_list[[3]] + p_list[[4]] +
+        plot_layout(ncol = 2)
+    }
+     if(length(p_list) == 3){
+      multi_plot <- p_list[[1]] + p_list[[2]] + p_list[[3]] + 
+        plot_layout(ncol = 2)
+    }
+    
+    if(show){ print(multi_plot) }
+    multiplot_save_pdf(plot = multi_plot,
+                       filename = paste0(figure_path, "/", subject_name, "_",
+                                         uq_name, "_spatial_multiplot.pdf"))
+  }
+}
+
+umap_feature_score <- function(seurat, subject_name, module_score,
+                               figure_path = NULL, show = TRUE){
+  umap <- FeaturePlot(seurat, features = module_score, reduction = "umap") +
+    ggtitle(label = paste0(subject_name, " : ", module_score)) +
+    theme(legend.position = "bottom")
+  if(show){print(umap)}
+  if(!is.null(figure_path)){
+    plot_save_pdf(plot = umap,
+                  filename = paste0(figure_path, "/", subject_name, "_",
+                                    module_score, "_umap.pdf"))
+  }
+}
+
+umap_dim_upper_score <- function(seurat, subject_name, module_score,
+                                    figure_path = NULL, show = TRUE){
+  uq_name <- gsub("_module_score1", "_upper_quantile", module_score)
+  umap <- DimPlot(seurat, group.by = uq_name, reduction = "umap") +
+    ggtitle(label = paste0(subject_name, " : ", uq_name)) +
+    scale_color_manual(values = c("TRUE" = "#FFFF00", "FALSE" = "#0000FF")) +
+    theme(legend.position = "bottom") +
+    theme_dark()
+  if(show){ print(umap) }
+  if(!is.null(figure_path)){
+    plot_save_pdf(plot = umap,
+                  filename = paste0(figure_path, "/", subject_name, "_",
+                                    uq_name, "_umap.pdf"))
+  }
+}
+
+violin_score <- function(seurat, subject_name, module_score, group.by,
+                         threshold_quantile = 0.75,
+                         figure_path = NULL, show = TRUE){
+  cell_meta_data <- seurat@meta.data
+  score_uq <- quantile(cell_meta_data[[module_score]],
+                       probs = threshold_quantile, names = FALSE)
+  matlab_pal <- colorRamps::matlab.like2(length(unique(cell_meta_data[[group.by]])))
+  viol <- ggplot(data = cell_meta_data, aes(x = .data[[group.by]],
+                                            y = .data[[module_score]],
+                                            fill = .data[[group.by]])) +
+    geom_jitter(size = 0.5, color = "#000000", width = 0.05) +
+    geom_violin(alpha = 0.6) +
+    geom_hline(yintercept = score_uq, col = "#FF0000", linetype = "dashed") +
+    scale_fill_manual(values = matlab_pal) +
+    ggtitle(label = paste0(subject_name, " : ", module_score))
+  if(show){ print(viol) }
+  if(!is.null(figure_path)){
+    plot_save_pdf(plot = viol,
+                  filename = paste0(figure_path, "/", subject_name, "_",
+                                    module_score, "_viol_", group.by, ".pdf"))
+  }
+}
+
+heatmap_score_genes <- function(seurat, subject_name, module_score, gene_set, group.by,
+                                figure_path = NULL, show = TRUE){
+  matlab_pal <- colorRamps::matlab.like2(length(unique(seurat@meta.data[[group.by]])))
+  hmap <- DoHeatmap(seurat,
+                    features = gene_set,
+                    group.by = group.by,
+                    group.colors = matlab_pal)
+  if(show){ print(hmap) }
+  if(!is.null(figure_path)){
+    # the heatmap needs to be saved as a png. 
+    # The plot becomes blurred as a PDF for some reason
+    ggsave(plot = hmap,
+           filename = paste0(figure_path, "/", subject_name, "_",
+                             module_score, "_hmap_", group.by, ".png"),
+           width = unit(6, "in"), height = unit(6, "in"))
+  }
+  
+}
+
+plot_all <- function(seurat, subject_name, module_score, gene_set, groupings,
+                     threshold_quantile = 0.75, figure_path){
+  spatial_feature_score(seurat, subject_name, module_score, figure_path,
+                        multipanel = TRUE)
+  spatial_dim_upper_score(seurat, subject_name, module_score, figure_path,
+                          multipanel = TRUE)
+  umap_feature_score(seurat, subject_name, module_score, figure_path)
+  umap_dim_upper_score(seurat, subject_name, module_score, figure_path)
+  for(g in groupings){
+    violin_score(seurat, subject_name, module_score,
+                 group.by = g, threshold_quantile, figure_path)
+    heatmap_score_genes(seurat, subject_name, module_score, gene_set,
+                        group.by = g, figure_path)
+  }
+}
+```
+
+```{r Create Directories}
+result_dir <- "processed_data/09_Immune_Module_Scores"
+if(!dir.exists(result_dir)){
+  dir.create(result_dir)
+}
+
+figure_dir <- "figures/09_Immune_Module_Scores"
+if(!dir.exists(figure_dir)){
+  dir.create(figure_dir)
+}
+```
+
+```{r Gene Lists for Module Scores}
+immune_markers <-
+  list(
+    "T_cell" = c("PTPRC", "CD3D", "CD3E", "CD3G", "LCK", "CD8A", "CD4", "B3GAT1", 
+                 "CD69", "FOXP3", "LAG3", "TNFRSF9", "CXCR5", "IL2RA", "PDCD1", 
+                 "GZMB", "TOX2", "CCR7"),
+    "B_cell" = c("PTPRC", "CD19", "MS4A1", "CR2", "IGHM", "AICDA"),
+    "myeloid" = c("PTPRC","CD14", "CD68", "FCGR3A", "FCGR3B", "ADGRE1", "ARG1", 
+                  "CD209", "CD274", "ITGAM", "FCER2"),
+    "fibroblast" = c("ACTA2", "KRT20", "PDPN", "VIM"),
+    "class_II_MHC" = c("HLA-DRA", "HLA-DQA1", "HLA-DQA2", "HLA-DQB2", "HLA-DPA1", "HLA-DPB1")
+  )
+
+# PDAC Typing Module Scores
+# source: https://www.biorxiv.org/content/10.1101/2022.07.16.500312v1.full
+cancer_modules <- 
+  list(
+    "Classical" = c("BTNL8", "FAM3D", "ATAD4", "AGR3", "CTSE", "LOC400573", "LYZ",
+                    "TFF2", "TFF1", "ANXA10", "LGALS4", "PLA2G10", "CEACAM6",
+                    "VSIG2", "TSPAN8", "ST6GALNAC1", "AGR2", "TFF3", "CYP3A7",
+                    "MYO1A", "CLRN3", "KRT20", "CDH17", "SPINK4", "REG4"),
+    "Basal_like" = c("VGLL", "UCA1", "S100A2", "LY6D", "SPRR3", "SPRR1B", "LEMD1",
+                     "KRT15", "CTSL2", "DHRS9", "AREG", "CST6", "SERPINB3", "KRT6C",
+                     "KRTGA", "SERPINB4", "FAM83A", "SCEL", "FGFBP1", "KRT7",
+                     "KRT17", "GPR87", "TNS4", "SLC2A1", "ANXA8L2"),
+    "CSC" = c("ABCG2", "ALDH1A1", "CD24", "CD44", "EPCAM", "PROM1","CXCR4", 
+              "NES", "DCLK1", "SOX9", "NANOG")
+  )
+
+# 12 chemokine signature in TLS
+chemokine_modules <- list(
+  "chemokine" = c("CCL2", "CCL3", "CCL4", "CCL5", "CCL8", "CCL18", "CCL19", "CCL21",
+                  "CXCL9", "CXCL10", "CXCL11", "CXCL13")
+)
+
+# groupings for module score plotting
+groupings <- c("cell_type_confirmed", "segment", "seurat_clusters", "TLS")
+```
+
+```{r Subject 01}
+seurat <- readRDS("processed_data/08_TLS_Annotation/subject_01_TLS_annotation.rds")
+threshold <- 0.8
+sn <- "subject_01"
+
+# directory for saving figures
+sub_figure_dir <- paste0(figure_dir, "/", sn)
+if(!dir.exists(sub_figure_dir)){
+  dir.create(sub_figure_dir)
+}
+
+# calculate immune cell module score
+seurat <- calculate_module_scores(seurat,
+                                  gene_set_list = immune_markers,
+                                  threshold_quantile = threshold)
+
+# calculate cancer module scores
+seurat <- calculate_module_scores(seurat,
+                                  gene_set_list = cancer_modules,
+                                  threshold_quantile = NULL)
+
+# calculate chemokine module scores
+seurat <- calculate_module_scores(seurat,
+                                  gene_set_list = chemokine_modules,
+                                  threshold_quantile = NULL)
+
+# report thresholds
+# T cell Score
+T_cell_uq <- quantile(seurat@meta.data[["T_cell_module_score1"]],
+                         probs = threshold, names = FALSE)
+print(T_cell_uq)
+# B cell Score
+B_cell_uq <- quantile(seurat@meta.data[["B_cell_module_score1"]],
+                         probs = threshold, names = FALSE)
+print(B_cell_uq)
+
+# plot T cell module score details
+plot_all(seurat, subject_name = sn, module_score = "T_cell_module_score1",
+         gene_set = immune_markers$T_cell, figure_path = sub_figure_dir,
+         groupings = groupings)
+
+# plot B cell module score details
+plot_all(seurat, subject_name = sn, module_score = "B_cell_module_score1",
+         gene_set = immune_markers$B_cell, figure_path = sub_figure_dir,
+         groupings = groupings)
+
+# Plot Classical module
+ms <- "Classical_module_score1"
+spatial_feature_score(seurat, subject_name = sn, module_score = ms,
+                      figure_path = sub_figure_dir, multipanel = TRUE)
+umap_feature_score(seurat, subject_name = sn, module_score = ms, 
+                   figure_path = sub_figure_dir)
+for(g in groupings){
+  violin_score(seurat, subject_name = sn, module_score = ms, group.by = g, 
+               threshold_quantile = NULL, figure_path = sub_figure_dir)
+  heatmap_score_genes(seurat, subject_name = sn, module_score = ms,
+                      gene_set = cancer_modules[["Classical"]],
+                      group.by = g, figure_path = sub_figure_dir)
+}
+
+# Plot Basal-like module
+ms <- "Basal_like_module_score1"
+spatial_feature_score(seurat, subject_name = sn, module_score = ms,
+                      figure_path = sub_figure_dir, multipanel = TRUE)
+umap_feature_score(seurat, subject_name = sn, module_score = ms, 
+                   figure_path = sub_figure_dir)
+for(g in groupings){
+  violin_score(seurat, subject_name = sn, module_score = ms, group.by = g, 
+               threshold_quantile = NULL, figure_path = sub_figure_dir)
+  heatmap_score_genes(seurat, subject_name = sn, module_score = ms,
+                      gene_set = cancer_modules[["Basal_like"]],
+                      group.by = g, figure_path = sub_figure_dir)
+}
+
+# Plot CSC module
+ms <- "CSC_module_score1"
+spatial_feature_score(seurat, subject_name = sn, module_score = ms,
+                      figure_path = sub_figure_dir, multipanel = TRUE)
+umap_feature_score(seurat, subject_name = sn, module_score = ms, 
+                   figure_path = sub_figure_dir)
+for(g in groupings){
+  violin_score(seurat, subject_name = sn, module_score = ms, group.by = g, 
+               threshold_quantile = NULL, figure_path = sub_figure_dir)
+  heatmap_score_genes(seurat, subject_name = sn, module_score = ms,
+                      gene_set = cancer_modules[["CSC"]],
+                      group.by = g, figure_path = sub_figure_dir)
+}
+
+# Plot chemokine module
+ms <- "chemokine_module_score1"
+spatial_feature_score(seurat, subject_name = sn, module_score = ms,
+                      figure_path = sub_figure_dir, multipanel = TRUE)
+umap_feature_score(seurat, subject_name = sn, module_score = ms, 
+                   figure_path = sub_figure_dir)
+for(g in groupings){
+  violin_score(seurat, subject_name = sn, module_score = ms, group.by = g, 
+               threshold_quantile = NULL, figure_path = sub_figure_dir)
+  heatmap_score_genes(seurat, subject_name = sn, module_score = ms,
+                      gene_set = chemokine_modules[["chemokine"]],
+                      group.by = g, figure_path = sub_figure_dir)
+}
+
+# save result with module scores incorporated
+saveRDS(seurat,
+        file = paste0(result_dir, "/", sn, "_module_scores.rds"))
+
+rm(seurat)
+```
+
+```{r Subject 02}
+seurat <- readRDS("processed_data/08_TLS_Annotation/subject_02_TLS_annotation.rds")
+threshold <- 0.8
+sn <- "subject_02"
+
+# directory for saving figures
+sub_figure_dir <- paste0(figure_dir, "/", sn)
+if(!dir.exists(sub_figure_dir)){
+  dir.create(sub_figure_dir)
+}
+
+# calculate immune cell module score
+seurat <- calculate_module_scores(seurat,
+                                  gene_set_list = immune_markers,
+                                  threshold_quantile = threshold)
+
+# calculate cancer module scores
+seurat <- calculate_module_scores(seurat,
+                                  gene_set_list = cancer_modules,
+                                  threshold_quantile = NULL)
+
+# calculate chemokine module scores
+seurat <- calculate_module_scores(seurat,
+                                  gene_set_list = chemokine_modules,
+                                  threshold_quantile = NULL)
+
+# report thresholds
+# T cell Score
+T_cell_uq <- quantile(seurat@meta.data[["T_cell_module_score1"]],
+                         probs = threshold, names = FALSE)
+print(T_cell_uq)
+# B cell Score
+B_cell_uq <- quantile(seurat@meta.data[["B_cell_module_score1"]],
+                         probs = threshold, names = FALSE)
+print(B_cell_uq)
+
+# plot T cell module score details
+plot_all(seurat, subject_name = sn, module_score = "T_cell_module_score1",
+         gene_set = immune_markers$T_cell, figure_path = sub_figure_dir,
+         groupings = groupings)
+
+# plot B cell module score details
+plot_all(seurat, subject_name = sn, module_score = "B_cell_module_score1",
+         gene_set = immune_markers$B_cell, figure_path = sub_figure_dir,
+         groupings = groupings)
+
+# Plot Classical module
+ms <- "Classical_module_score1"
+spatial_feature_score(seurat, subject_name = sn, module_score = ms,
+                      figure_path = sub_figure_dir, multipanel = TRUE)
+umap_feature_score(seurat, subject_name = sn, module_score = ms, 
+                   figure_path = sub_figure_dir)
+for(g in groupings){
+  violin_score(seurat, subject_name = sn, module_score = ms, group.by = g, 
+               threshold_quantile = NULL, figure_path = sub_figure_dir)
+  heatmap_score_genes(seurat, subject_name = sn, module_score = ms,
+                      gene_set = cancer_modules[["Classical"]],
+                      group.by = g, figure_path = sub_figure_dir)
+}
+
+# Plot Basal-like module
+ms <- "Basal_like_module_score1"
+spatial_feature_score(seurat, subject_name = sn, module_score = ms,
+                      figure_path = sub_figure_dir, multipanel = TRUE)
+umap_feature_score(seurat, subject_name = sn, module_score = ms, 
+                   figure_path = sub_figure_dir)
+for(g in groupings){
+  violin_score(seurat, subject_name = sn, module_score = ms, group.by = g, 
+               threshold_quantile = NULL, figure_path = sub_figure_dir)
+  heatmap_score_genes(seurat, subject_name = sn, module_score = ms,
+                      gene_set = cancer_modules[["Basal_like"]],
+                      group.by = g, figure_path = sub_figure_dir)
+}
+
+# Plot CSC module
+ms <- "CSC_module_score1"
+spatial_feature_score(seurat, subject_name = sn, module_score = ms,
+                      figure_path = sub_figure_dir, multipanel = TRUE)
+umap_feature_score(seurat, subject_name = sn, module_score = ms, 
+                   figure_path = sub_figure_dir)
+for(g in groupings){
+  violin_score(seurat, subject_name = sn, module_score = ms, group.by = g, 
+               threshold_quantile = NULL, figure_path = sub_figure_dir)
+  heatmap_score_genes(seurat, subject_name = sn, module_score = ms,
+                      gene_set = cancer_modules[["CSC"]],
+                      group.by = g, figure_path = sub_figure_dir)
+}
+
+# Plot chemokine module
+ms <- "chemokine_module_score1"
+spatial_feature_score(seurat, subject_name = sn, module_score = ms,
+                      figure_path = sub_figure_dir, multipanel = TRUE)
+umap_feature_score(seurat, subject_name = sn, module_score = ms, 
+                   figure_path = sub_figure_dir)
+for(g in groupings){
+  violin_score(seurat, subject_name = sn, module_score = ms, group.by = g, 
+               threshold_quantile = NULL, figure_path = sub_figure_dir)
+  heatmap_score_genes(seurat, subject_name = sn, module_score = ms,
+                      gene_set = chemokine_modules[["chemokine"]],
+                      group.by = g, figure_path = sub_figure_dir)
+}
+
+# save result with module scores incorporated
+saveRDS(seurat,
+        file = paste0(result_dir, "/", sn, "_module_scores.rds"))
+
+rm(seurat)
+```
+
+```{r Subject 03}
+seurat <- readRDS("processed_data/08_TLS_Annotation/subject_03_TLS_annotation.rds")
+threshold <- 0.8
+sn <- "subject_03"
+
+# directory for saving figures
+sub_figure_dir <- paste0(figure_dir, "/", sn)
+if(!dir.exists(sub_figure_dir)){
+  dir.create(sub_figure_dir)
+}
+
+# calculate immune cell module score
+seurat <- calculate_module_scores(seurat,
+                                  gene_set_list = immune_markers,
+                                  threshold_quantile = threshold)
+
+# calculate cancer module scores
+seurat <- calculate_module_scores(seurat,
+                                  gene_set_list = cancer_modules,
+                                  threshold_quantile = NULL)
+
+# calculate chemokine module scores
+seurat <- calculate_module_scores(seurat,
+                                  gene_set_list = chemokine_modules,
+                                  threshold_quantile = NULL)
+
+# report thresholds
+# T cell Score
+T_cell_uq <- quantile(seurat@meta.data[["T_cell_module_score1"]],
+                         probs = threshold, names = FALSE)
+print(T_cell_uq)
+# B cell Score
+B_cell_uq <- quantile(seurat@meta.data[["B_cell_module_score1"]],
+                         probs = threshold, names = FALSE)
+print(B_cell_uq)
+
+# plot T cell module score details
+plot_all(seurat, subject_name = sn, module_score = "T_cell_module_score1",
+         gene_set = immune_markers$T_cell, figure_path = sub_figure_dir,
+         groupings = groupings)
+
+# plot B cell module score details
+plot_all(seurat, subject_name = sn, module_score = "B_cell_module_score1",
+         gene_set = immune_markers$B_cell, figure_path = sub_figure_dir,
+         groupings = groupings)
+
+# Plot Classical module
+ms <- "Classical_module_score1"
+spatial_feature_score(seurat, subject_name = sn, module_score = ms,
+                      figure_path = sub_figure_dir, multipanel = TRUE)
+umap_feature_score(seurat, subject_name = sn, module_score = ms, 
+                   figure_path = sub_figure_dir)
+for(g in groupings){
+  violin_score(seurat, subject_name = sn, module_score = ms, group.by = g, 
+               threshold_quantile = NULL, figure_path = sub_figure_dir)
+  heatmap_score_genes(seurat, subject_name = sn, module_score = ms,
+                      gene_set = cancer_modules[["Classical"]],
+                      group.by = g, figure_path = sub_figure_dir)
+}
+
+# Plot Basal-like module
+ms <- "Basal_like_module_score1"
+spatial_feature_score(seurat, subject_name = sn, module_score = ms,
+                      figure_path = sub_figure_dir, multipanel = TRUE)
+umap_feature_score(seurat, subject_name = sn, module_score = ms, 
+                   figure_path = sub_figure_dir)
+for(g in groupings){
+  violin_score(seurat, subject_name = sn, module_score = ms, group.by = g, 
+               threshold_quantile = NULL, figure_path = sub_figure_dir)
+  heatmap_score_genes(seurat, subject_name = sn, module_score = ms,
+                      gene_set = cancer_modules[["Basal_like"]],
+                      group.by = g, figure_path = sub_figure_dir)
+}
+
+# Plot CSC module
+ms <- "CSC_module_score1"
+spatial_feature_score(seurat, subject_name = sn, module_score = ms,
+                      figure_path = sub_figure_dir, multipanel = TRUE)
+umap_feature_score(seurat, subject_name = sn, module_score = ms, 
+                   figure_path = sub_figure_dir)
+for(g in groupings){
+  violin_score(seurat, subject_name = sn, module_score = ms, group.by = g, 
+               threshold_quantile = NULL, figure_path = sub_figure_dir)
+  heatmap_score_genes(seurat, subject_name = sn, module_score = ms,
+                      gene_set = cancer_modules[["CSC"]],
+                      group.by = g, figure_path = sub_figure_dir)
+}
+
+# Plot chemokine module
+ms <- "chemokine_module_score1"
+spatial_feature_score(seurat, subject_name = sn, module_score = ms,
+                      figure_path = sub_figure_dir, multipanel = TRUE)
+umap_feature_score(seurat, subject_name = sn, module_score = ms, 
+                   figure_path = sub_figure_dir)
+for(g in groupings){
+  violin_score(seurat, subject_name = sn, module_score = ms, group.by = g, 
+               threshold_quantile = NULL, figure_path = sub_figure_dir)
+  heatmap_score_genes(seurat, subject_name = sn, module_score = ms,
+                      gene_set = chemokine_modules[["chemokine"]],
+                      group.by = g, figure_path = sub_figure_dir)
+}
+
+# save result with module scores incorporated
+saveRDS(seurat,
+        file = paste0(result_dir, "/", sn, "_module_scores.rds"))
+
+rm(seurat)
+```
+
+```{r Subject 04}
+seurat <- readRDS("processed_data/08_TLS_Annotation/subject_04_TLS_annotation.rds")
+threshold <- 0.8
+sn <- "subject_04"
+
+# directory for saving figures
+sub_figure_dir <- paste0(figure_dir, "/", sn)
+if(!dir.exists(sub_figure_dir)){
+  dir.create(sub_figure_dir)
+}
+
+# calculate immune cell module score
+seurat <- calculate_module_scores(seurat,
+                                  gene_set_list = immune_markers,
+                                  threshold_quantile = threshold)
+
+# calculate cancer module scores
+seurat <- calculate_module_scores(seurat,
+                                  gene_set_list = cancer_modules,
+                                  threshold_quantile = NULL)
+
+# calculate chemokine module scores
+seurat <- calculate_module_scores(seurat,
+                                  gene_set_list = chemokine_modules,
+                                  threshold_quantile = NULL)
+
+# report thresholds
+# T cell Score
+T_cell_uq <- quantile(seurat@meta.data[["T_cell_module_score1"]],
+                         probs = threshold, names = FALSE)
+print(T_cell_uq)
+# B cell Score
+B_cell_uq <- quantile(seurat@meta.data[["B_cell_module_score1"]],
+                         probs = threshold, names = FALSE)
+print(B_cell_uq)
+
+# plot T cell module score details
+plot_all(seurat, subject_name = sn, module_score = "T_cell_module_score1",
+         gene_set = immune_markers$T_cell, figure_path = sub_figure_dir,
+         groupings = groupings)
+
+# plot B cell module score details
+plot_all(seurat, subject_name = sn, module_score = "B_cell_module_score1",
+         gene_set = immune_markers$B_cell, figure_path = sub_figure_dir,
+         groupings = groupings)
+
+# Plot Classical module
+ms <- "Classical_module_score1"
+spatial_feature_score(seurat, subject_name = sn, module_score = ms,
+                      figure_path = sub_figure_dir, multipanel = TRUE)
+umap_feature_score(seurat, subject_name = sn, module_score = ms, 
+                   figure_path = sub_figure_dir)
+for(g in groupings){
+  violin_score(seurat, subject_name = sn, module_score = ms, group.by = g, 
+               threshold_quantile = NULL, figure_path = sub_figure_dir)
+  heatmap_score_genes(seurat, subject_name = sn, module_score = ms,
+                      gene_set = cancer_modules[["Classical"]],
+                      group.by = g, figure_path = sub_figure_dir)
+}
+
+# Plot Basal-like module
+ms <- "Basal_like_module_score1"
+spatial_feature_score(seurat, subject_name = sn, module_score = ms,
+                      figure_path = sub_figure_dir, multipanel = TRUE)
+umap_feature_score(seurat, subject_name = sn, module_score = ms, 
+                   figure_path = sub_figure_dir)
+for(g in groupings){
+  violin_score(seurat, subject_name = sn, module_score = ms, group.by = g, 
+               threshold_quantile = NULL, figure_path = sub_figure_dir)
+  heatmap_score_genes(seurat, subject_name = sn, module_score = ms,
+                      gene_set = cancer_modules[["Basal_like"]],
+                      group.by = g, figure_path = sub_figure_dir)
+}
+
+# Plot CSC module
+ms <- "CSC_module_score1"
+spatial_feature_score(seurat, subject_name = sn, module_score = ms,
+                      figure_path = sub_figure_dir, multipanel = TRUE)
+umap_feature_score(seurat, subject_name = sn, module_score = ms, 
+                   figure_path = sub_figure_dir)
+for(g in groupings){
+  violin_score(seurat, subject_name = sn, module_score = ms, group.by = g, 
+               threshold_quantile = NULL, figure_path = sub_figure_dir)
+  heatmap_score_genes(seurat, subject_name = sn, module_score = ms,
+                      gene_set = cancer_modules[["CSC"]],
+                      group.by = g, figure_path = sub_figure_dir)
+}
+
+# Plot chemokine module
+ms <- "chemokine_module_score1"
+spatial_feature_score(seurat, subject_name = sn, module_score = ms,
+                      figure_path = sub_figure_dir, multipanel = TRUE)
+umap_feature_score(seurat, subject_name = sn, module_score = ms, 
+                   figure_path = sub_figure_dir)
+for(g in groupings){
+  violin_score(seurat, subject_name = sn, module_score = ms, group.by = g, 
+               threshold_quantile = NULL, figure_path = sub_figure_dir)
+  heatmap_score_genes(seurat, subject_name = sn, module_score = ms,
+                      gene_set = chemokine_modules[["chemokine"]],
+                      group.by = g, figure_path = sub_figure_dir)
+}
+
+# save result with module scores incorporated
+saveRDS(seurat,
+        file = paste0(result_dir, "/", sn, "_module_scores.rds"))
+
+rm(seurat)
+```
+
+```{r Subject 05}
+seurat <- readRDS("processed_data/08_TLS_Annotation/subject_05_TLS_annotation.rds")
+threshold <- 0.8
+sn <- "subject_05"
+
+# directory for saving figures
+sub_figure_dir <- paste0(figure_dir, "/", sn)
+if(!dir.exists(sub_figure_dir)){
+  dir.create(sub_figure_dir)
+}
+
+# calculate immune cell module score
+seurat <- calculate_module_scores(seurat,
+                                  gene_set_list = immune_markers,
+                                  threshold_quantile = threshold)
+
+# calculate cancer module scores
+seurat <- calculate_module_scores(seurat,
+                                  gene_set_list = cancer_modules,
+                                  threshold_quantile = NULL)
+
+# calculate chemokine module scores
+seurat <- calculate_module_scores(seurat,
+                                  gene_set_list = chemokine_modules,
+                                  threshold_quantile = NULL)
+
+# report thresholds
+# T cell Score
+T_cell_uq <- quantile(seurat@meta.data[["T_cell_module_score1"]],
+                         probs = threshold, names = FALSE)
+print(T_cell_uq)
+# B cell Score
+B_cell_uq <- quantile(seurat@meta.data[["B_cell_module_score1"]],
+                         probs = threshold, names = FALSE)
+print(B_cell_uq)
+
+# plot T cell module score details
+plot_all(seurat, subject_name = sn, module_score = "T_cell_module_score1",
+         gene_set = immune_markers$T_cell, figure_path = sub_figure_dir,
+         groupings = groupings)
+
+# plot B cell module score details
+plot_all(seurat, subject_name = sn, module_score = "B_cell_module_score1",
+         gene_set = immune_markers$B_cell, figure_path = sub_figure_dir,
+         groupings = groupings)
+
+# Plot Classical module
+ms <- "Classical_module_score1"
+spatial_feature_score(seurat, subject_name = sn, module_score = ms,
+                      figure_path = sub_figure_dir, multipanel = TRUE)
+umap_feature_score(seurat, subject_name = sn, module_score = ms, 
+                   figure_path = sub_figure_dir)
+for(g in groupings){
+  violin_score(seurat, subject_name = sn, module_score = ms, group.by = g, 
+               threshold_quantile = NULL, figure_path = sub_figure_dir)
+  heatmap_score_genes(seurat, subject_name = sn, module_score = ms,
+                      gene_set = cancer_modules[["Classical"]],
+                      group.by = g, figure_path = sub_figure_dir)
+}
+
+# Plot Basal-like module
+ms <- "Basal_like_module_score1"
+spatial_feature_score(seurat, subject_name = sn, module_score = ms,
+                      figure_path = sub_figure_dir, multipanel = TRUE)
+umap_feature_score(seurat, subject_name = sn, module_score = ms, 
+                   figure_path = sub_figure_dir)
+for(g in groupings){
+  violin_score(seurat, subject_name = sn, module_score = ms, group.by = g, 
+               threshold_quantile = NULL, figure_path = sub_figure_dir)
+  heatmap_score_genes(seurat, subject_name = sn, module_score = ms,
+                      gene_set = cancer_modules[["Basal_like"]],
+                      group.by = g, figure_path = sub_figure_dir)
+}
+
+# Plot CSC module
+ms <- "CSC_module_score1"
+spatial_feature_score(seurat, subject_name = sn, module_score = ms,
+                      figure_path = sub_figure_dir, multipanel = TRUE)
+umap_feature_score(seurat, subject_name = sn, module_score = ms, 
+                   figure_path = sub_figure_dir)
+for(g in groupings){
+  violin_score(seurat, subject_name = sn, module_score = ms, group.by = g, 
+               threshold_quantile = NULL, figure_path = sub_figure_dir)
+  heatmap_score_genes(seurat, subject_name = sn, module_score = ms,
+                      gene_set = cancer_modules[["CSC"]],
+                      group.by = g, figure_path = sub_figure_dir)
+}
+
+# Plot chemokine module
+ms <- "chemokine_module_score1"
+spatial_feature_score(seurat, subject_name = sn, module_score = ms,
+                      figure_path = sub_figure_dir, multipanel = TRUE)
+umap_feature_score(seurat, subject_name = sn, module_score = ms, 
+                   figure_path = sub_figure_dir)
+for(g in groupings){
+  violin_score(seurat, subject_name = sn, module_score = ms, group.by = g, 
+               threshold_quantile = NULL, figure_path = sub_figure_dir)
+  heatmap_score_genes(seurat, subject_name = sn, module_score = ms,
+                      gene_set = chemokine_modules[["chemokine"]],
+                      group.by = g, figure_path = sub_figure_dir)
+}
+
+# save result with module scores incorporated
+saveRDS(seurat,
+        file = paste0(result_dir, "/", sn, "_module_scores.rds"))
+
+rm(seurat)
+```

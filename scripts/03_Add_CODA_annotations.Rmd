@@ -1,0 +1,106 @@
+---
+title: 'Multilesion CODA: All samples'
+author: "Kevin Feng"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Load libraries
+```{r load libraries, message=FALSE}
+library(Seurat)
+library(ggplot2)
+library(patchwork)
+library(dplyr)
+library(rhdf5)
+library(ggrepel)
+library(RColorBrewer)
+```
+
+## Load sobjs and CODA annotations
+```{r load sobjs and coda annotations, message=FALSE}
+# get all the paths of all the sobj's
+rds_files <- list.files(path = 'processed_data/02_Scale_Expression_and_Cluster_in_Segment',
+                        pattern = '*.rds', full.names = TRUE)
+rds_files
+
+# get all paths for coda annotations 
+coda_files <- list.files(path = 'data/MultiLesionCohort/CODA', 
+                         pattern = 'tissue_positions_list_tissue_compositions.xlsx', recursive = TRUE, full.names = TRUE)
+coda_files
+
+# get rds prefix's
+# rds_names <- list.files(path = 'rds', pattern = '*.rds')
+# rds_names <- sub('*_preprocessed.rds', '', rds_names) # drop current suffix
+rds_names <- gsub("_preprocessed.rds$", "",
+                  gsub("^processed_data/02_Scale_Expression_and_Cluster_in_Segment/",
+                       "", rds_files))
+rds_names
+
+```
+
+## Process, plot, and save
+Here, we will add the CODA annotations to each sobj, plot each cell type for each sobj, then save the new sobj in a new folder.
+```{r process plot and save, message=FALSE}
+### define functions 
+# assign rownames and drop useless columns 
+# subset for barcodes present in the sobj
+# find correct cells types
+process_coda_annos <- function(coda_df, this_sobj){
+  # assign barcodes as rownames
+  rownames(coda_df) <- coda_df[,1]
+  # drop columns 1:6
+  coda_df[,1:6] <- NULL
+  # subset for barcodes in sobj
+  coda_df <- coda_df[rownames(coda_df) %in% Cells(this_sobj), ]
+  # Threshold >= 70 for cell type, else na
+  cell_type_lables <- c()
+  for(row_idx in 1:nrow(coda_df)){
+    if(max(coda_df[row_idx,]) >= 70){
+      cell_type_lables <- c(cell_type_lables, colnames(coda_df)[which.max(coda_df[row_idx,])]) 
+    }
+    else{
+      cell_type_lables <- c(cell_type_lables, 'NA')
+    }
+  }
+  coda_df$cell_type <- cell_type_lables
+  return(coda_df)
+}
+
+# function to add coda cell_type metadata to sobj
+# takes output from process_coda_annos function and corresponding sobj as input
+# returns new sobj with updated metadata and plots each cell type 
+add_metadata_plot <- function(coda_df, sobj, this_name){
+  # check that all barcodes in the coda annotation are in the sobj
+  print(all(rownames(coda_df) %in% Cells(sobj)))
+  # add cell_type to metadata
+  # sobj@meta.data <- cbind(sobj@meta.data, cell_type = coda_df$cell_type)
+  # order the coda barcodes correctly
+  sobj@meta.data$cell_type <- coda_df[match(Cells(sobj),rownames(coda_df)),]$cell_type
+  # change idents
+  Idents(sobj) <- "cell_type"
+  # print breakdown of cell types
+  print(table(sobj@meta.data$cell_type))
+  # plot each cell type individually 
+  print(SpatialDimPlot(sobj, 
+               cells.highlight = CellsByIdentities(object = sobj, idents = c("islets", "normal epithelium", "smooth muscle", "fat", "acini", "collagen", "nontissue", "PanIN", "pdac", "NA")),
+               facet.highlight = T, ncol = 4, pt.size.factor = 3))
+  file_name <- paste0('03_CODA_annotated/', this_name, '_CODA_annotated.rds')
+  # saveRDS(sobj, file = file_name)
+  return(sobj)
+}
+
+for (idx in 1:length(rds_files)) {
+  this_coda_df <- as.data.frame(readxl::read_excel(coda_files[idx])) # read in coda ano at idx
+  this_sobj <- readRDS(rds_files[idx]) # read in sobj at idx
+  this_coda_df_processed <- process_coda_annos(this_coda_df, this_sobj) # process coda annotations
+  add_metadata_plot(this_coda_df_processed, this_sobj, rds_names[idx]) # add coda cell types to sobj, plot cell types, save as new sobj
+}
+```
+
+

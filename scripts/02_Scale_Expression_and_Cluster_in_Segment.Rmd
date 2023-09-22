@@ -1,0 +1,2744 @@
+---
+title: "02_Scale_Expression_and_Cluster_in_Segment"
+author: "Jacob Mitchell"
+date: '2022-09-22'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r Load Libraries}
+library(Seurat)
+library(ggplot2)
+library(grid)
+library(gridExtra)
+library(colorRamps)
+
+# Python Environment
+library(reticulate)
+use_condaenv(condaenv = "panin_visium")
+# leidenalg version 0.8.10
+
+sessionInfo()
+```
+
+```{r Create Directories}
+results_dir <- "processed_data/02_Scale_Expression_and_Cluster_in_Segment"
+if(!dir.exists(results_dir)){
+  dir.create(results_dir)
+}
+figure_dir <- "figures/02_Scale_Expression_and_Cluster_in_Segment"
+if(!dir.exists(figure_dir)){
+  dir.create(figure_dir)
+}
+```
+
+```{r Custom Functions}
+# save plot as 6" x 6" png
+plot_save_png <- function(plot, filename){
+  ggsave(plot = plot,
+         filename = paste0(filename),
+         width = 6, height = 6)
+}
+# save plot as 6" x 6" pdf
+plot_save_pdf <- function(plot, filename){
+  ggsave(plot = plot,
+         filename = paste0(filename),
+         width = unit(6, "in"), height = unit(6, "in"))
+}
+# scale all genes in SCT assay
+scale_sct <- function(seurat, assay = "SCT"){
+  all_genes <- rownames(seurat)
+  seurat <- ScaleData(seurat, features = all_genes, assay = assay)
+  return(seurat)
+}
+
+# plot a list of multiple genes
+plot_spatial_gene_list <- 
+  function(seurat, features, filename = NULL, slot = "scale.data",
+           show = FALSE){
+    plot_list <- list()
+    a <- 1
+    if(sum(features %in% rownames(seurat)) == 0){
+      return("No listed features not present in data")
+    }
+    for(i in 1:length(features)){
+      if(features[i] %in% rownames(seurat)){
+        
+        plot_list[[paste0("plot_", a)]] <-
+          SpatialFeaturePlot(seurat, features = features[i], slot = slot,
+                             alpha = 0.75)
+        a <- a + 1
+      } else {
+        print(paste0(features[i], " not present in data"))
+      }
+    }
+    a <- 1
+    plot_len <- length(plot_list)
+    
+    p <- arrangeGrob(grobs = plot_list, widths = c(1,1,1,1),
+                     ncol = 4)
+    if(!is.null(filename)){
+      ggsave(plot = p,
+             filename = filename,
+             width = unit(16, "in"),
+             height = unit((ceiling(plot_len/4) * 4), "in"))
+    }
+    if(show){
+      grid.draw(p)
+    }
+  }
+
+# Seurat 4.1.1 has a bug where group by does not work for SpatialDimPlot.
+# Coloring by other variables requires that the variable be set to ident
+plot_highlight_clusters <-
+  function(seurat, filename = NULL){
+    clusters <- levels(Idents(seurat))
+    plot_len <- length(clusters)
+    
+    plot_list <- list()
+    a <- 1
+    for(i in clusters){
+      plot_list[[paste0("cluster_", i)]] <-
+        SpatialDimPlot(seurat,
+                       cells.highlight = CellsByIdentities(seurat,idents = i),
+                       cols.highlight = c("black", "#FFFFFF00"),
+                       pt.size.factor = 2,
+                       alpha = 0.3) +
+        theme(legend.position = "top") +
+        guides(fill=guide_legend(title="cluster"))
+      
+    }
+    p <- arrangeGrob(grobs = plot_list, widths = c(1,1,1,1),
+                     ncol = 4)
+    if(!is.null(filename)){
+      ggsave(plot = p,
+             filename = filename,
+             width = unit(16, "in"),
+             height = unit((ceiling(plot_len/4) * 4), "in"))
+    }
+}
+```
+
+```{r Gene Lists}
+# Plot Immune Cell Marker Genes
+immune_markers <-
+  list(
+    "T_cell" = c("PTPRC", "CD3D", "CD3E", "CD3G", "LCK", "CD8A", "CD4", "B3GAT1", "CD69", "FOXP3", "LAG3", "TNFRSF9", "CXCR5", "IL2RA", "PDCD1", "GZMB", "TOX2", "CCR7"),
+    "B_cell" = c("CD19", "MS4A1", "CR2", "IGHM", "AICDA"),
+    "myeloid" = c("CD14", "CD68", "FCGR3A", "FCGR3B", "ADGRE1", "ARG1", "CD209", "CD274", "ITGAM", "FCER2"),
+    "fibroblast" = c("ACTA2", "KRT20", "PDPN", "VIM"),
+    "class_II_MHC" = c("HLA-DRA", "HLA-DQA1", "HLA-DQA2", "HLA-DQB2", "HLA-DPA1", "HLA-DPB1"),
+    "cell_cycle" = c("MKI67", "TOP2A")
+  )
+immune_markers_all <- unlist(immune_markers, use.names = FALSE)
+
+# includes IMC marker genes
+# CD45 - PTPRC
+# CD3 - CD3D, CD3E, CD3G; CD57 - B3GAT1; CD137 - TNFRSF9; CD25 - IL2RA; PD1 - PDCD1
+# CD20 - MS4A1; CD21 - CR2; AID -AICDA
+# CD16 - FCGR3A, FCGR3B; DCSIGN - CD209; PDL1 - CD274; CD11b - ITGAM; CD23 - FCER2
+# SMA - ACTA2; CK - KRT20; Podoplanin - PDPN;
+# ClassII MHC - HLA-DRA, HLA-DQA1, HLA-DQA2, HLA-DQB2, HLA-DPA1, HLA-DPB1
+# KI67 - MKI67
+
+# Pancreatic cell markers
+# source: Murano et al 2016
+# https://pubmed.ncbi.nlm.nih.gov/27693023/
+
+pancreas_markers <-
+  list(
+    "alpha" = c("GCG", "LOXL4", "PLCE1", "IRX2", "GC", "KLHL41", "CRYBA2", "TTR", "TM4SF4", "RGS4", "MAFB"),
+    "beta" = c("INS", "IAPP", "NPTX2", "DLK1", "ADCYAP1", "PFKFB2", "PDX1", "TGFBR3", "SYT13", "MAFB"),
+    "delta" = c("SST", "PRG4", "LEPR", "RBP4", "BCHE", "HHEX", "FRZB", "PCSK1", "PCSK1", "RGS2", "GABRG2", "MAFB"),
+    "polypeptide" = c("SERTM1", "CARTPT", "SLITRK6", "ETV1", "THSD7A", "AQP3", "ENTPD2", "PTGFR", "PAX6"),
+    "acinar" = c("PRSS1", "PNLIP"),
+    "ductal" = c("KRT7", "CFTR"),
+    "mesenchymal" = c("COL1A1", "ACTA2", "FBN1")
+  )
+```
+
+```{r List Data Files}
+data_dir <- "processed_data/01_Read_Segments_Normalize_and_Scale"
+rds_list <- list.files(data_dir)
+```
+
+```{r Segment: CP01}
+seg_name <- "CP01"
+CP01_file <- rds_list[grep("^CP01", rds_list)]
+figure_dir_CP01 <- paste0(figure_dir, "/", seg_name)
+if(!dir.exists(figure_dir_CP01)){
+  dir.create(figure_dir_CP01)
+}
+
+CP01 <- readRDS(paste0(data_dir, "/", CP01_file))
+
+CP01 <- scale_sct(CP01)
+# list top 20 spatially variable genes
+suppressWarnings(
+      top20_space_var <- head(SpatiallyVariableFeatures(
+        CP01, selection.method = "markvariogram"), 20)
+    )
+print(top20_space_var)
+plot_spatial_gene_list(
+  CP01,
+  features = top20_space_var,
+  filename = paste0(figure_dir_CP01,"/spatial_variable_genes.pdf")
+  )
+plot_spatial_gene_list(CP01, features = pancreas_markers$alpha,
+                       filename = paste0(figure_dir_CP01, "/spatial_alpha_markers.pdf"))
+plot_spatial_gene_list(CP01, features = pancreas_markers$beta,
+                       filename = paste0(figure_dir_CP01, "/spatial_beta_markers.pdf"))
+plot_spatial_gene_list(CP01, features = pancreas_markers$delta,
+                       filename = paste0(figure_dir_CP01, "/spatial_delta_markers.pdf"))
+plot_spatial_gene_list(CP01, features = pancreas_markers$polypeptide,
+                       filename = paste0(figure_dir_CP01, "/spatial_polypeptide_markers.pdf"))
+plot_spatial_gene_list(CP01, features = pancreas_markers$acinar,
+                       filename = paste0(figure_dir_CP01, "/spatial_acinar_markers.pdf"))
+plot_spatial_gene_list(CP01, features = pancreas_markers$ductal,
+                       filename = paste0(figure_dir_CP01, "/spatial_ductal_markers.pdf"))
+plot_spatial_gene_list(CP01, features = pancreas_markers$mesenchymal,
+                       filename = paste0(figure_dir_CP01, "/spatial_mesenchymal_markers.pdf"))
+plot_spatial_gene_list(CP01, features = immune_markers$T_cell,
+                       filename = paste0(figure_dir_CP01, "/spatial_Tcell_markers.pdf"))
+plot_spatial_gene_list(CP01, features = immune_markers$B_cell,
+                       filename = paste0(figure_dir_CP01, "/spatial_Bcell_markers.pdf"))
+plot_spatial_gene_list(CP01, features = immune_markers$myeloid,
+                       filename = paste0(figure_dir_CP01, "/spatial_myeloid_markers.pdf"))
+plot_spatial_gene_list(CP01, features = immune_markers$fibroblast,
+                       filename = paste0(figure_dir_CP01, "/spatial_fibroblast_markers.pdf"))
+plot_spatial_gene_list(CP01, features = immune_markers$class_II_MHC,
+                       filename = paste0(figure_dir_CP01, "/spatial_classII_MHC_markers.pdf"))
+plot_spatial_gene_list(CP01, features = immune_markers$cell_cycle,
+                       filename = paste0(figure_dir_CP01, "/spatial_cycling_markers.pdf"))
+
+for(marker in immune_markers_all){
+  if(marker %in% rownames(CP01)){
+    plot <- SpatialFeaturePlot(CP01, features = marker, alpha = 1)
+    plot_save_pdf(plot = plot,
+                  filename = paste0(figure_dir_CP01, "/marker_", marker, ".pdf"))
+  } else {
+    print(paste0(marker, " not present in data"))
+  }
+}
+
+# PCA analysis
+CP01 <- RunPCA(CP01, assay = "SCT")
+elbow_plot <- ElbowPlot(CP01, ndims = 50)
+
+# assess Elbow plot
+elbow_plot
+
+# clustering and embedding based on 25 PCs 
+# 25 dims clustering
+CP01 <- FindNeighbors(CP01, reduction = "pca", dims = 1:25)
+suppressWarnings(
+  CP01 <- FindClusters(CP01, algorithm = 4, resolution = 0.8)
+)
+# suppressed warnings for legibility on knitted file
+# Warning message:
+## Warning in paste("reticulate", module, "load", sep = "::"): NAs introduced by
+## coercion to integer range
+leiden_pal <- colorRamps::matlab.like2(length(levels(Idents(CP01))))
+
+CP01$Leiden_clusters <- CP01$seurat_clusters
+lei_plot <- SpatialDimPlot(CP01, pt.size.factor = 2) +
+  scale_fill_manual(values = leiden_pal) +
+  ggtitle(paste0(seg_name, ": Leiden Clusters"))
+print(lei_plot)
+plot_save_pdf(plot = lei_plot,
+              filename = paste0(figure_dir_CP01, "/spatial_leiden_idents.pdf"))
+plot_highlight_clusters(CP01,
+                        filename = paste0(figure_dir_CP01, "/spatial_leiden_clusters_res_0.8.pdf"))
+
+# Notes on cluster alignment with segment morphology
+# 1 : inflamed acinar?
+# 2 : inflamed acinar?
+# 3 : edge of fibrosis
+# 4 : fibrosis dense ECM
+# 5 : low-density ECM, inflamed?
+# 6 : collagen surrounding ducts
+# 7 : acinar
+# 8 : collagen between acinar lobes
+# 9 : low-densty ECM
+# 10 : ductal cells
+# 11 : islet cells
+
+# plot PCA with cluster labeling
+pca_plot <- DimPlot(CP01, group.by = "Leiden_clusters", reduction = "pca") +
+  ggtitle(paste0(seg_name, " PCA: Leiden Clusters"))
+print(pca_plot)
+plot_save_pdf(pca_plot,
+              filename = paste0(figure_dir_CP01, "/pca_leiden_clusters.pdf"))
+
+# compute UMAP
+CP01 <- RunUMAP(CP01, reduction = "pca", dims = 1:25)
+umap_plot <- DimPlot(CP01, group.by = "Leiden_clusters", reduction = "umap", label = TRUE) +
+  ggtitle(paste0(seg_name, " UMAP: Leiden Clusters"))
+print(umap_plot)
+plot_save_pdf(umap_plot,
+              filename = paste0(figure_dir_CP01, "/umap_leiden_clusters.pdf"))
+
+# save segment with low-dim embeddings
+saveRDS(CP01,
+        file = paste0(results_dir, "/", seg_name, "_preprocessed.rds"))
+
+# remove the seurat object to save memory for the other segments
+rm(CP01)
+```
+
+```{r Segment: NRL01}
+seg_name <- "NRL01"
+NRL01_file <- rds_list[grep("^NRL01", rds_list)]
+figure_dir_NRL01 <- paste0(figure_dir, "/", seg_name)
+if(!dir.exists(figure_dir_NRL01)){
+  dir.create(figure_dir_NRL01)
+}
+
+NRL01 <- readRDS(paste0(data_dir, "/", NRL01_file))
+
+NRL01 <- scale_sct(NRL01)
+# list top 20 spatially variable genes
+suppressWarnings(
+      top20_space_var <- head(SpatiallyVariableFeatures(
+        NRL01, selection.method = "markvariogram"), 20)
+    )
+print(top20_space_var)
+plot_spatial_gene_list(
+  NRL01,
+  features = top20_space_var,
+  filename = paste0(figure_dir_NRL01,"/spatial_variable_genes.pdf")
+  )
+plot_spatial_gene_list(NRL01, features = pancreas_markers$alpha,
+                       filename = paste0(figure_dir_NRL01, "/spatial_alpha_markers.pdf"))
+plot_spatial_gene_list(NRL01, features = pancreas_markers$beta,
+                       filename = paste0(figure_dir_NRL01, "/spatial_beta_markers.pdf"))
+plot_spatial_gene_list(NRL01, features = pancreas_markers$delta,
+                       filename = paste0(figure_dir_NRL01, "/spatial_delta_markers.pdf"))
+plot_spatial_gene_list(NRL01, features = pancreas_markers$polypeptide,
+                       filename = paste0(figure_dir_NRL01, "/spatial_polypeptide_markers.pdf"))
+plot_spatial_gene_list(NRL01, features = pancreas_markers$acinar,
+                       filename = paste0(figure_dir_NRL01, "/spatial_acinar_markers.pdf"))
+plot_spatial_gene_list(NRL01, features = pancreas_markers$ductal,
+                       filename = paste0(figure_dir_NRL01, "/spatial_ductal_markers.pdf"))
+plot_spatial_gene_list(NRL01, features = pancreas_markers$mesenchymal,
+                       filename = paste0(figure_dir_NRL01, "/spatial_mesenchymal_markers.pdf"))
+plot_spatial_gene_list(NRL01, features = immune_markers$T_cell,
+                       filename = paste0(figure_dir_NRL01, "/spatial_Tcell_markers.pdf"))
+plot_spatial_gene_list(NRL01, features = immune_markers$B_cell,
+                       filename = paste0(figure_dir_NRL01, "/spatial_Bcell_markers.pdf"))
+plot_spatial_gene_list(NRL01, features = immune_markers$myeloid,
+                       filename = paste0(figure_dir_NRL01, "/spatial_myeloid_markers.pdf"))
+plot_spatial_gene_list(NRL01, features = immune_markers$fibroblast,
+                       filename = paste0(figure_dir_NRL01, "/spatial_fibroblast_markers.pdf"))
+plot_spatial_gene_list(NRL01, features = immune_markers$class_II_MHC,
+                       filename = paste0(figure_dir_NRL01, "/spatial_classII_MHC_markers.pdf"))
+plot_spatial_gene_list(NRL01, features = immune_markers$cell_cycle,
+                       filename = paste0(figure_dir_NRL01, "/spatial_cycling_markers.pdf"))
+
+for(marker in immune_markers_all){
+  if(marker %in% rownames(NRL01)){
+    plot <- SpatialFeaturePlot(NRL01, features = marker, alpha = 1)
+    plot_save_pdf(plot = plot,
+                  filename = paste0(figure_dir_NRL01, "/marker_", marker, ".pdf"))
+  } else {
+    print(paste0(marker, " not present in data"))
+  }
+}
+
+# PCA analysis
+NRL01 <- RunPCA(NRL01, assay = "SCT")
+elbow_plot <- ElbowPlot(NRL01, ndims = 50)
+
+# assess Elbow plot
+elbow_plot
+
+# clustering and embedding based on 25 PCs 
+# 25 dims clustering
+NRL01 <- FindNeighbors(NRL01, reduction = "pca", dims = 1:25)
+suppressWarnings(
+  NRL01 <- FindClusters(NRL01, algorithm = 4, resolution = 0.8)
+)
+# suppressed warnings for legibility on knitted file
+# Warning message:
+## Warning in paste("reticulate", module, "load", sep = "::"): NAs introduced by
+## coercion to integer range
+
+NRL01$Leiden_clusters <- NRL01$seurat_clusters
+leiden_pal <- colorRamps::matlab.like2(length(levels(Idents(NRL01))))
+
+NRL01$Leiden_clusters <- NRL01$seurat_clusters
+lei_plot <- SpatialDimPlot(NRL01, pt.size.factor = 2) +
+  scale_fill_manual(values = leiden_pal) +
+  ggtitle(paste0(seg_name, ": Leiden Clusters"))
+print(lei_plot)
+plot_save_pdf(plot = lei_plot,
+              filename = paste0(figure_dir_NRL01, "/spatial_leiden_idents.pdf"))
+plot_highlight_clusters(NRL01,
+                        filename = paste0(figure_dir_NRL01, "/spatial_leiden_clusters_res_0.8.pdf"))
+
+# Notes on cluster alignment with segment morphology
+# 1 : acinar, deeper in lobes
+# 2 : blood vessels, outside acinare lobes
+# 3 : exterior ECM
+# 4 : acinar, many cells have lipid vacuoles
+# 5 : acinar, more interculated ECM space
+# 6 : acinar, deeper
+# 7 : dense exterior ECM
+# 8 : ECM, seems to be near smaller blood vessels
+# 9 : adipose tissue
+# 10 : ductal cells + surrounding collagen
+# 11 : islet
+
+# plot PCA with cluster labeling
+pca_plot <- DimPlot(NRL01, group.by = "Leiden_clusters", reduction = "pca") +
+  ggtitle(paste0(seg_name, " PCA: Leiden Clusters"))
+print(pca_plot)
+plot_save_pdf(pca_plot,
+              filename = paste0(figure_dir_NRL01, "/pca_leiden_clusters.pdf"))
+
+# compute UMAP
+NRL01 <- RunUMAP(NRL01, reduction = "pca", dims = 1:25)
+umap_plot <- DimPlot(NRL01, group.by = "Leiden_clusters", reduction = "umap", label = TRUE) +
+  ggtitle(paste0(seg_name, " UMAP: Leiden Clusters"))
+print(umap_plot)
+plot_save_pdf(umap_plot,
+              filename = paste0(figure_dir_NRL01, "/umap_leiden_clusters.pdf"))
+
+# save segment with low-dim embeddings
+saveRDS(NRL01,
+        file = paste0(results_dir, "/", seg_name, "_preprocessed.rds"))
+
+# remove the seurat object to save memory for the other segments
+rm(NRL01)
+```
+
+```{r Segment: PANIN01}
+seg_name <- "PANIN01"
+PANIN01_file <- rds_list[grep("^PANIN01", rds_list)]
+figure_dir_PANIN01 <- paste0(figure_dir, "/", seg_name)
+if(!dir.exists(figure_dir_PANIN01)){
+  dir.create(figure_dir_PANIN01)
+}
+
+PANIN01 <- readRDS(paste0(data_dir, "/", PANIN01_file))
+
+PANIN01 <- scale_sct(PANIN01)
+# list top 20 spatially variable genes
+suppressWarnings(
+      top20_space_var <- head(SpatiallyVariableFeatures(
+        PANIN01, selection.method = "markvariogram"), 20)
+    )
+print(top20_space_var)
+plot_spatial_gene_list(
+  PANIN01,
+  features = top20_space_var,
+  filename = paste0(figure_dir_PANIN01,"/spatial_variable_genes.pdf")
+  )
+plot_spatial_gene_list(PANIN01, features = pancreas_markers$alpha,
+                       filename = paste0(figure_dir_PANIN01, "/spatial_alpha_markers.pdf"))
+plot_spatial_gene_list(PANIN01, features = pancreas_markers$beta,
+                       filename = paste0(figure_dir_PANIN01, "/spatial_beta_markers.pdf"))
+plot_spatial_gene_list(PANIN01, features = pancreas_markers$delta,
+                       filename = paste0(figure_dir_PANIN01, "/spatial_delta_markers.pdf"))
+plot_spatial_gene_list(PANIN01, features = pancreas_markers$polypeptide,
+                       filename = paste0(figure_dir_PANIN01, "/spatial_polypeptide_markers.pdf"))
+plot_spatial_gene_list(PANIN01, features = pancreas_markers$acinar,
+                       filename = paste0(figure_dir_PANIN01, "/spatial_acinar_markers.pdf"))
+plot_spatial_gene_list(PANIN01, features = pancreas_markers$ductal,
+                       filename = paste0(figure_dir_PANIN01, "/spatial_ductal_markers.pdf"))
+plot_spatial_gene_list(PANIN01, features = pancreas_markers$mesenchymal,
+                       filename = paste0(figure_dir_PANIN01, "/spatial_mesenchymal_markers.pdf"))
+plot_spatial_gene_list(PANIN01, features = immune_markers$T_cell,
+                       filename = paste0(figure_dir_PANIN01, "/spatial_Tcell_markers.pdf"))
+plot_spatial_gene_list(PANIN01, features = immune_markers$B_cell,
+                       filename = paste0(figure_dir_PANIN01, "/spatial_Bcell_markers.pdf"))
+plot_spatial_gene_list(PANIN01, features = immune_markers$myeloid,
+                       filename = paste0(figure_dir_PANIN01, "/spatial_myeloid_markers.pdf"))
+plot_spatial_gene_list(PANIN01, features = immune_markers$fibroblast,
+                       filename = paste0(figure_dir_PANIN01, "/spatial_fibroblast_markers.pdf"))
+plot_spatial_gene_list(PANIN01, features = immune_markers$class_II_MHC,
+                       filename = paste0(figure_dir_PANIN01, "/spatial_classII_MHC_markers.pdf"))
+plot_spatial_gene_list(PANIN01, features = immune_markers$cell_cycle,
+                       filename = paste0(figure_dir_PANIN01, "/spatial_cycling_markers.pdf"))
+
+for(marker in immune_markers_all){
+  if(marker %in% rownames(PANIN01)){
+    plot <- SpatialFeaturePlot(PANIN01, features = marker, alpha = 1)
+    plot_save_pdf(plot = plot,
+                  filename = paste0(figure_dir_PANIN01, "/marker_", marker, ".pdf"))
+  } else {
+    print(paste0(marker, " not present in data"))
+  }
+}
+
+# PCA analysis
+PANIN01 <- RunPCA(PANIN01, assay = "SCT")
+elbow_plot <- ElbowPlot(PANIN01, ndims = 50)
+
+# assess Elbow plot
+elbow_plot
+
+# clustering and embedding based on 25 PCs 
+# 25 dims clustering
+PANIN01 <- FindNeighbors(PANIN01, reduction = "pca", dims = 1:25)
+suppressWarnings(
+  PANIN01 <- FindClusters(PANIN01, algorithm = 4, resolution = 0.8)
+)
+# suppressed warnings for legibility on knitted file
+# Warning message:
+## Warning in paste("reticulate", module, "load", sep = "::"): NAs introduced by
+## coercion to integer range
+
+PANIN01$Leiden_clusters <- PANIN01$seurat_clusters
+leiden_pal <- colorRamps::matlab.like2(length(levels(Idents(PANIN01))))
+
+PANIN01$Leiden_clusters <- PANIN01$seurat_clusters
+lei_plot <- SpatialDimPlot(PANIN01, pt.size.factor = 2) +
+  scale_fill_manual(values = leiden_pal) +
+  ggtitle(paste0(seg_name, ": Leiden Clusters"))
+print(lei_plot)
+plot_save_pdf(plot = lei_plot,
+              filename = paste0(figure_dir_PANIN01, "/spatial_leiden_idents.pdf"))
+plot_highlight_clusters(PANIN01,
+                        filename = paste0(figure_dir_PANIN01, "/spatial_leiden_clusters_res_0.8.pdf"))
+
+# Notes on cluster alignment with segment morphology
+# 1 : Fibrosis surrounding lymphoid aggregates
+# 2 : Deeper fibrosis
+# 3 : Acinar outside fibrotic region
+# 4 : Lymphoid aggregates within outer fibrosis
+# 5 : Deeper fibrosis, adjacent to blood vessels
+# 6 : Fibrosis surrounding dysplatic ducts
+# 7 : Islets, much larger than other segments
+# 8 : Stroma between acinar lobes
+# 9 : Acinar wirh minimal inflammation
+# 10 : blood vessels
+
+# the only regions that look like ducts to me are on the edge and dont have any spots
+
+# plot PCA with cluster labeling
+pca_plot <- DimPlot(PANIN01, group.by = "Leiden_clusters", reduction = "pca") +
+  ggtitle(paste0(seg_name, " PCA: Leiden Clusters"))
+print(pca_plot)
+plot_save_pdf(pca_plot,
+              filename = paste0(figure_dir_PANIN01, "/pca_leiden_clusters.pdf"))
+
+# compute UMAP
+PANIN01 <- RunUMAP(PANIN01, reduction = "pca", dims = 1:25)
+umap_plot <- DimPlot(PANIN01, group.by = "Leiden_clusters", reduction = "umap", label = TRUE) +
+  ggtitle(paste0(seg_name, " UMAP: Leiden Clusters"))
+print(umap_plot)
+plot_save_pdf(umap_plot,
+              filename = paste0(figure_dir_PANIN01, "/umap_leiden_clusters.pdf"))
+
+# save segment with low-dim embeddings
+saveRDS(PANIN01,
+        file = paste0(results_dir, "/", seg_name, "_preprocessed.rds"))
+
+# remove the seurat object to save memory for the other segments
+rm(PANIN01)
+```
+
+```{r Segment: PDAC01}
+seg_name <- "PDAC01"
+PDAC01_file <- rds_list[grep("^PDAC01", rds_list)]
+figure_dir_PDAC01 <- paste0(figure_dir, "/", seg_name)
+if(!dir.exists(figure_dir_PDAC01)){
+  dir.create(figure_dir_PDAC01)
+}
+
+PDAC01 <- readRDS(paste0(data_dir, "/", PDAC01_file))
+
+PDAC01 <- scale_sct(PDAC01)
+# list top 20 spatially variable genes
+suppressWarnings(
+      top20_space_var <- head(SpatiallyVariableFeatures(
+        PDAC01, selection.method = "markvariogram"), 20)
+    )
+print(top20_space_var)
+plot_spatial_gene_list(
+  PDAC01,
+  features = top20_space_var,
+  filename = paste0(figure_dir_PDAC01,"/spatial_variable_genes.pdf")
+  )
+plot_spatial_gene_list(PDAC01, features = pancreas_markers$alpha,
+                       filename = paste0(figure_dir_PDAC01, "/spatial_alpha_markers.pdf"))
+plot_spatial_gene_list(PDAC01, features = pancreas_markers$beta,
+                       filename = paste0(figure_dir_PDAC01, "/spatial_beta_markers.pdf"))
+plot_spatial_gene_list(PDAC01, features = pancreas_markers$delta,
+                       filename = paste0(figure_dir_PDAC01, "/spatial_delta_markers.pdf"))
+plot_spatial_gene_list(PDAC01, features = pancreas_markers$polypeptide,
+                       filename = paste0(figure_dir_PDAC01, "/spatial_polypeptide_markers.pdf"))
+plot_spatial_gene_list(PDAC01, features = pancreas_markers$acinar,
+                       filename = paste0(figure_dir_PDAC01, "/spatial_acinar_markers.pdf"))
+plot_spatial_gene_list(PDAC01, features = pancreas_markers$ductal,
+                       filename = paste0(figure_dir_PDAC01, "/spatial_ductal_markers.pdf"))
+plot_spatial_gene_list(PDAC01, features = pancreas_markers$mesenchymal,
+                       filename = paste0(figure_dir_PDAC01, "/spatial_mesenchymal_markers.pdf"))
+plot_spatial_gene_list(PDAC01, features = immune_markers$T_cell,
+                       filename = paste0(figure_dir_PDAC01, "/spatial_Tcell_markers.pdf"))
+plot_spatial_gene_list(PDAC01, features = immune_markers$B_cell,
+                       filename = paste0(figure_dir_PDAC01, "/spatial_Bcell_markers.pdf"))
+plot_spatial_gene_list(PDAC01, features = immune_markers$myeloid,
+                       filename = paste0(figure_dir_PDAC01, "/spatial_myeloid_markers.pdf"))
+plot_spatial_gene_list(PDAC01, features = immune_markers$fibroblast,
+                       filename = paste0(figure_dir_PDAC01, "/spatial_fibroblast_markers.pdf"))
+plot_spatial_gene_list(PDAC01, features = immune_markers$class_II_MHC,
+                       filename = paste0(figure_dir_PDAC01, "/spatial_classII_MHC_markers.pdf"))
+plot_spatial_gene_list(PDAC01, features = immune_markers$cell_cycle,
+                       filename = paste0(figure_dir_PDAC01, "/spatial_cycling_markers.pdf"))
+
+for(marker in immune_markers_all){
+  if(marker %in% rownames(PDAC01)){
+    plot <- SpatialFeaturePlot(PDAC01, features = marker, alpha = 1)
+    plot_save_pdf(plot = plot,
+                  filename = paste0(figure_dir_PDAC01, "/marker_", marker, ".pdf"))
+  } else {
+    print(paste0(marker, " not present in data"))
+  }
+}
+
+# PCA analysis
+PDAC01 <- RunPCA(PDAC01, assay = "SCT")
+elbow_plot <- ElbowPlot(PDAC01, ndims = 50)
+
+# assess Elbow plot
+elbow_plot
+
+# clustering and embedding based on 25 PCs 
+# 25 dims clustering
+PDAC01 <- FindNeighbors(PDAC01, reduction = "pca", dims = 1:25)
+suppressWarnings(
+  PDAC01 <- FindClusters(PDAC01, algorithm = 4, resolution = 0.8)
+)
+# suppressed warnings for legibility on knitted file
+# Warning message:
+## Warning in paste("reticulate", module, "load", sep = "::"): NAs introduced by
+## coercion to integer range
+
+PDAC01$Leiden_clusters <- PDAC01$seurat_clusters
+leiden_pal <- colorRamps::matlab.like2(length(levels(Idents(PDAC01))))
+
+PDAC01$Leiden_clusters <- PDAC01$seurat_clusters
+lei_plot <- SpatialDimPlot(PDAC01, pt.size.factor = 2) +
+  scale_fill_manual(values = leiden_pal) +
+  ggtitle(paste0(seg_name, ": Leiden Clusters"))
+print(lei_plot)
+plot_save_pdf(plot = lei_plot,
+              filename = paste0(figure_dir_PDAC01, "/spatial_leiden_idents.pdf"))
+plot_highlight_clusters(PDAC01,
+                        filename = paste0(figure_dir_PDAC01, "/spatial_leiden_clusters_res_0.8.pdf"))
+
+# Notes on cluster alignment with segment morphology
+# 1 : ECM, outermost layer of tumor
+# 2 : Acinar cells outside of tumor
+# 3 : tumor epithelium
+# 4 : acinar, increased interstitial space
+# 5 : tumor regions adjacent to cancerous ducts
+# 6 : ECM, surrounding acinar lobes
+# 7 : Dense ECM in the tumor
+# 8 : Inflamattion, more dispersed than lymphoid aggregates
+# 9 : ECM, subset of tumor fibrosis
+# 10 : Dense ECM deep within the tumor
+# 11 : Blood vessels in the tumor periphery
+# 12 : islet, both inside and outside the tumor
+# 13 : small group of ductal cells in the tumor
+
+
+# plot PCA with cluster labeling
+pca_plot <- DimPlot(PDAC01, group.by = "Leiden_clusters", reduction = "pca") +
+  ggtitle(paste0(seg_name, " PCA: Leiden Clusters"))
+print(pca_plot)
+plot_save_pdf(pca_plot,
+              filename = paste0(figure_dir_PDAC01, "/pca_leiden_clusters.pdf"))
+
+# compute UMAP
+PDAC01 <- RunUMAP(PDAC01, reduction = "pca", dims = 1:25)
+umap_plot <- DimPlot(PDAC01, group.by = "Leiden_clusters", reduction = "umap", label = TRUE) +
+  ggtitle(paste0(seg_name, " UMAP: Leiden Clusters"))
+print(umap_plot)
+plot_save_pdf(umap_plot,
+              filename = paste0(figure_dir_PDAC01, "/umap_leiden_clusters.pdf"))
+
+# save segment with low-dim embeddings
+saveRDS(PDAC01,
+        file = paste0(results_dir, "/", seg_name, "_preprocessed.rds"))
+
+# remove the seurat object to save memory for the other segments
+rm(PDAC01)
+```
+
+```{r Segment: NRL02}
+seg_name <- "NRL02"
+NRL02_file <- rds_list[grep("^NRL02", rds_list)]
+figure_dir_NRL02 <- paste0(figure_dir, "/", seg_name)
+if(!dir.exists(figure_dir_NRL02)){
+  dir.create(figure_dir_NRL02)
+}
+
+NRL02 <- readRDS(paste0(data_dir, "/", NRL02_file))
+
+NRL02 <- scale_sct(NRL02)
+# list top 20 spatially variable genes
+suppressWarnings(
+      top20_space_var <- head(SpatiallyVariableFeatures(
+        NRL02, selection.method = "markvariogram"), 20)
+    )
+print(top20_space_var)
+plot_spatial_gene_list(
+  NRL02,
+  features = top20_space_var,
+  filename = paste0(figure_dir_NRL02,"/spatial_variable_genes.pdf")
+  )
+plot_spatial_gene_list(NRL02, features = pancreas_markers$alpha,
+                       filename = paste0(figure_dir_NRL02, "/spatial_alpha_markers.pdf"))
+plot_spatial_gene_list(NRL02, features = pancreas_markers$beta,
+                       filename = paste0(figure_dir_NRL02, "/spatial_beta_markers.pdf"))
+plot_spatial_gene_list(NRL02, features = pancreas_markers$delta,
+                       filename = paste0(figure_dir_NRL02, "/spatial_delta_markers.pdf"))
+plot_spatial_gene_list(NRL02, features = pancreas_markers$polypeptide,
+                       filename = paste0(figure_dir_NRL02, "/spatial_polypeptide_markers.pdf"))
+plot_spatial_gene_list(NRL02, features = pancreas_markers$acinar,
+                       filename = paste0(figure_dir_NRL02, "/spatial_acinar_markers.pdf"))
+plot_spatial_gene_list(NRL02, features = pancreas_markers$ductal,
+                       filename = paste0(figure_dir_NRL02, "/spatial_ductal_markers.pdf"))
+plot_spatial_gene_list(NRL02, features = pancreas_markers$mesenchymal,
+                       filename = paste0(figure_dir_NRL02, "/spatial_mesenchymal_markers.pdf"))
+plot_spatial_gene_list(NRL02, features = immune_markers$T_cell,
+                       filename = paste0(figure_dir_NRL02, "/spatial_Tcell_markers.pdf"))
+plot_spatial_gene_list(NRL02, features = immune_markers$B_cell,
+                       filename = paste0(figure_dir_NRL02, "/spatial_Bcell_markers.pdf"))
+plot_spatial_gene_list(NRL02, features = immune_markers$myeloid,
+                       filename = paste0(figure_dir_NRL02, "/spatial_myeloid_markers.pdf"))
+plot_spatial_gene_list(NRL02, features = immune_markers$fibroblast,
+                       filename = paste0(figure_dir_NRL02, "/spatial_fibroblast_markers.pdf"))
+plot_spatial_gene_list(NRL02, features = immune_markers$class_II_MHC,
+                       filename = paste0(figure_dir_NRL02, "/spatial_classII_MHC_markers.pdf"))
+plot_spatial_gene_list(NRL02, features = immune_markers$cell_cycle,
+                       filename = paste0(figure_dir_NRL02, "/spatial_cycling_markers.pdf"))
+
+for(marker in immune_markers_all){
+  if(marker %in% rownames(NRL02)){
+    plot <- SpatialFeaturePlot(NRL02, features = marker, alpha = 1)
+    plot_save_pdf(plot = plot,
+                  filename = paste0(figure_dir_NRL02, "/marker_", marker, ".pdf"))
+  } else {
+    print(paste0(marker, " not present in data"))
+  }
+}
+
+# PCA analysis
+NRL02 <- RunPCA(NRL02, assay = "SCT")
+elbow_plot <- ElbowPlot(NRL02, ndims = 50)
+
+# assess Elbow plot
+elbow_plot
+
+# clustering and embedding based on 20 PCs 
+# 25 dims clustering
+NRL02 <- FindNeighbors(NRL02, reduction = "pca", dims = 1:20)
+suppressWarnings(
+  NRL02 <- FindClusters(NRL02, algorithm = 4, resolution = 0.8)
+)
+# suppressed warnings for legibility on knitted file
+# Warning message:
+## Warning in paste("reticulate", module, "load", sep = "::"): NAs introduced by
+## coercion to integer range
+
+NRL02$Leiden_clusters <- NRL02$seurat_clusters
+leiden_pal <- colorRamps::matlab.like2(length(levels(Idents(NRL02))))
+
+NRL02$Leiden_clusters <- NRL02$seurat_clusters
+lei_plot <- SpatialDimPlot(NRL02, pt.size.factor = 2) +
+  scale_fill_manual(values = leiden_pal) +
+  ggtitle(paste0(seg_name, ": Leiden Clusters"))
+print(lei_plot)
+plot_save_pdf(plot = lei_plot,
+              filename = paste0(figure_dir_NRL02, "/spatial_leiden_idents.pdf"))
+plot_highlight_clusters(NRL02,
+                        filename = paste0(figure_dir_NRL02, "/spatial_leiden_clusters_res_0.8.pdf"))
+
+# Notes on cluster alignment with segment morphology
+# 1 : Acinar
+# 2 : Acinar
+# 3 : Acinar
+# 4 : Acinar, less cytoplasm?
+# 5 : Adipose
+# 6 : Collagen surrounding ducts and blood vessels
+# 7 : Islet
+
+# the distinction between the 4 acinar clusters is difficult to find without
+# delving into differential expression.
+# Regions where the segment has folded onto itself should be excluded.
+
+# plot PCA with cluster labeling
+pca_plot <- DimPlot(NRL02, group.by = "Leiden_clusters", reduction = "pca") +
+  ggtitle(paste0(seg_name, " PCA: Leiden Clusters"))
+print(pca_plot)
+plot_save_pdf(pca_plot,
+              filename = paste0(figure_dir_NRL02, "/pca_leiden_clusters.pdf"))
+
+# compute UMAP
+NRL02 <- RunUMAP(NRL02, reduction = "pca", dims = 1:25)
+umap_plot <- DimPlot(NRL02, group.by = "Leiden_clusters", reduction = "umap", label = TRUE) +
+  ggtitle(paste0(seg_name, " UMAP: Leiden Clusters"))
+print(umap_plot)
+plot_save_pdf(umap_plot,
+              filename = paste0(figure_dir_NRL02, "/umap_leiden_clusters.pdf"))
+
+# save segment with low-dim embeddings
+saveRDS(NRL02,
+        file = paste0(results_dir, "/", seg_name, "_preprocessed.rds"))
+
+# remove the seurat object to save memory for the other segments
+rm(NRL02)
+```
+
+```{r Segment: PANIN02A}
+seg_name <- "PANIN02A"
+PANIN02A_file <- rds_list[grep("^PANIN02A", rds_list)]
+figure_dir_PANIN02A <- paste0(figure_dir, "/", seg_name)
+if(!dir.exists(figure_dir_PANIN02A)){
+  dir.create(figure_dir_PANIN02A)
+}
+
+PANIN02A <- readRDS(paste0(data_dir, "/", PANIN02A_file))
+
+PANIN02A <- scale_sct(PANIN02A)
+# list top 20 spatially variable genes
+suppressWarnings(
+      top20_space_var <- head(SpatiallyVariableFeatures(
+        PANIN02A, selection.method = "markvariogram"), 20)
+    )
+print(top20_space_var)
+plot_spatial_gene_list(
+  PANIN02A,
+  features = top20_space_var,
+  filename = paste0(figure_dir_PANIN02A,"/spatial_variable_genes.pdf")
+  )
+plot_spatial_gene_list(PANIN02A, features = pancreas_markers$alpha,
+                       filename = paste0(figure_dir_PANIN02A, "/spatial_alpha_markers.pdf"))
+plot_spatial_gene_list(PANIN02A, features = pancreas_markers$beta,
+                       filename = paste0(figure_dir_PANIN02A, "/spatial_beta_markers.pdf"))
+plot_spatial_gene_list(PANIN02A, features = pancreas_markers$delta,
+                       filename = paste0(figure_dir_PANIN02A, "/spatial_delta_markers.pdf"))
+plot_spatial_gene_list(PANIN02A, features = pancreas_markers$polypeptide,
+                       filename = paste0(figure_dir_PANIN02A, "/spatial_polypeptide_markers.pdf"))
+plot_spatial_gene_list(PANIN02A, features = pancreas_markers$acinar,
+                       filename = paste0(figure_dir_PANIN02A, "/spatial_acinar_markers.pdf"))
+plot_spatial_gene_list(PANIN02A, features = pancreas_markers$ductal,
+                       filename = paste0(figure_dir_PANIN02A, "/spatial_ductal_markers.pdf"))
+plot_spatial_gene_list(PANIN02A, features = pancreas_markers$mesenchymal,
+                       filename = paste0(figure_dir_PANIN02A, "/spatial_mesenchymal_markers.pdf"))
+plot_spatial_gene_list(PANIN02A, features = immune_markers$T_cell,
+                       filename = paste0(figure_dir_PANIN02A, "/spatial_Tcell_markers.pdf"))
+plot_spatial_gene_list(PANIN02A, features = immune_markers$B_cell,
+                       filename = paste0(figure_dir_PANIN02A, "/spatial_Bcell_markers.pdf"))
+plot_spatial_gene_list(PANIN02A, features = immune_markers$myeloid,
+                       filename = paste0(figure_dir_PANIN02A, "/spatial_myeloid_markers.pdf"))
+plot_spatial_gene_list(PANIN02A, features = immune_markers$fibroblast,
+                       filename = paste0(figure_dir_PANIN02A, "/spatial_fibroblast_markers.pdf"))
+plot_spatial_gene_list(PANIN02A, features = immune_markers$class_II_MHC,
+                       filename = paste0(figure_dir_PANIN02A, "/spatial_classII_MHC_markers.pdf"))
+plot_spatial_gene_list(PANIN02A, features = immune_markers$cell_cycle,
+                       filename = paste0(figure_dir_PANIN02A, "/spatial_cycling_markers.pdf"))
+
+for(marker in immune_markers_all){
+  if(marker %in% rownames(PANIN02A)){
+    plot <- SpatialFeaturePlot(PANIN02A, features = marker, alpha = 1)
+    plot_save_pdf(plot = plot,
+                  filename = paste0(figure_dir_PANIN02A, "/marker_", marker, ".pdf"))
+  } else {
+    print(paste0(marker, " not present in data"))
+  }
+}
+
+# PCA analysis
+PANIN02A <- RunPCA(PANIN02A, assay = "SCT")
+elbow_plot <- ElbowPlot(PANIN02A, ndims = 50)
+
+# assess Elbow plot
+elbow_plot
+
+# clustering and embedding based on 20 PCs 
+# 20 dims clustering
+PANIN02A <- FindNeighbors(PANIN02A, reduction = "pca", dims = 1:20)
+suppressWarnings(
+  PANIN02A <- FindClusters(PANIN02A, algorithm = 4, resolution = 0.8)
+)
+# suppressed warnings for legibility on knitted file
+# Warning message:
+## Warning in paste("reticulate", module, "load", sep = "::"): NAs introduced by
+## coercion to integer range
+
+PANIN02A$Leiden_clusters <- PANIN02A$seurat_clusters
+leiden_pal <- colorRamps::matlab.like2(length(levels(Idents(PANIN02A))))
+
+PANIN02A$Leiden_clusters <- PANIN02A$seurat_clusters
+lei_plot <- SpatialDimPlot(PANIN02A, pt.size.factor = 2) +
+  scale_fill_manual(values = leiden_pal) +
+  ggtitle(paste0(seg_name, ": Leiden Clusters"))
+print(lei_plot)
+plot_save_pdf(plot = lei_plot,
+              filename = paste0(figure_dir_PANIN02A, "/spatial_leiden_idents.pdf"))
+plot_highlight_clusters(PANIN02A,
+                        filename = paste0(figure_dir_PANIN02A, "/spatial_leiden_clusters_res_0.8.pdf"))
+
+# Notes on cluster alignment with segment morphology
+# 1 : acinar, less cytoplasm
+# 2 : acinar
+# 3 : adipose, includes two large blood vessels
+# 4 : acinar, left of the central adipose, more cellular, inflamed?
+# 5 : boundary of acinar and fibrosis
+# 6 : collections of small ducts surrounded by fibrosis, acinar to ductal metaplasia?
+# 7 : acinar, left of central adipose, less cellular
+# 8 : acinar, right of central adipose, boundary with normal stroma
+# 9 : ductal
+# 10 : islet
+# 11 : acinar, right of central adipose
+
+# Duct with columnar cells captured, but need to check with other members on
+# assessment if this is PanIN.
+# Left of the adipose have ducts that could be panin, more fibrosis, seems more
+# inflamed. The adipose tissue forms a seam with a line of stroma dividing the
+# segment in half.
+# Creases in the segment do not form their own cluster, but could be removed to
+# be safe.
+
+# plot PCA with cluster labeling
+pca_plot <- DimPlot(PANIN02A, group.by = "Leiden_clusters", reduction = "pca") +
+  ggtitle(paste0(seg_name, " PCA: Leiden Clusters"))
+print(pca_plot)
+plot_save_pdf(pca_plot,
+              filename = paste0(figure_dir_PANIN02A, "/pca_leiden_clusters.pdf"))
+
+# compute UMAP
+PANIN02A <- RunUMAP(PANIN02A, reduction = "pca", dims = 1:25)
+umap_plot <- DimPlot(PANIN02A, group.by = "Leiden_clusters", reduction = "umap", label = TRUE) +
+  ggtitle(paste0(seg_name, " UMAP: Leiden Clusters"))
+print(umap_plot)
+plot_save_pdf(umap_plot,
+              filename = paste0(figure_dir_PANIN02A, "/umap_leiden_clusters.pdf"))
+
+# save segment with low-dim embeddings
+saveRDS(PANIN02A,
+        file = paste0(results_dir, "/", seg_name, "_preprocessed.rds"))
+
+# remove the seurat object to save memory for the other segments
+rm(PANIN02A)
+```
+
+```{r Segment: PANIN02B}
+seg_name <- "PANIN02B"
+PANIN02B_file <- rds_list[grep("^PANIN02B", rds_list)]
+figure_dir_PANIN02B <- paste0(figure_dir, "/", seg_name)
+if(!dir.exists(figure_dir_PANIN02B)){
+  dir.create(figure_dir_PANIN02B)
+}
+
+PANIN02B <- readRDS(paste0(data_dir, "/", PANIN02B_file))
+
+PANIN02B <- scale_sct(PANIN02B)
+# list top 20 spatially variable genes
+suppressWarnings(
+      top20_space_var <- head(SpatiallyVariableFeatures(
+        PANIN02B, selection.method = "markvariogram"), 20)
+    )
+print(top20_space_var)
+plot_spatial_gene_list(
+  PANIN02B,
+  features = top20_space_var,
+  filename = paste0(figure_dir_PANIN02B,"/spatial_variable_genes.pdf")
+  )
+plot_spatial_gene_list(PANIN02B, features = pancreas_markers$alpha,
+                       filename = paste0(figure_dir_PANIN02B, "/spatial_alpha_markers.pdf"))
+plot_spatial_gene_list(PANIN02B, features = pancreas_markers$beta,
+                       filename = paste0(figure_dir_PANIN02B, "/spatial_beta_markers.pdf"))
+plot_spatial_gene_list(PANIN02B, features = pancreas_markers$delta,
+                       filename = paste0(figure_dir_PANIN02B, "/spatial_delta_markers.pdf"))
+plot_spatial_gene_list(PANIN02B, features = pancreas_markers$polypeptide,
+                       filename = paste0(figure_dir_PANIN02B, "/spatial_polypeptide_markers.pdf"))
+plot_spatial_gene_list(PANIN02B, features = pancreas_markers$acinar,
+                       filename = paste0(figure_dir_PANIN02B, "/spatial_acinar_markers.pdf"))
+plot_spatial_gene_list(PANIN02B, features = pancreas_markers$ductal,
+                       filename = paste0(figure_dir_PANIN02B, "/spatial_ductal_markers.pdf"))
+plot_spatial_gene_list(PANIN02B, features = pancreas_markers$mesenchymal,
+                       filename = paste0(figure_dir_PANIN02B, "/spatial_mesenchymal_markers.pdf"))
+plot_spatial_gene_list(PANIN02B, features = immune_markers$T_cell,
+                       filename = paste0(figure_dir_PANIN02B, "/spatial_Tcell_markers.pdf"))
+plot_spatial_gene_list(PANIN02B, features = immune_markers$B_cell,
+                       filename = paste0(figure_dir_PANIN02B, "/spatial_Bcell_markers.pdf"))
+plot_spatial_gene_list(PANIN02B, features = immune_markers$myeloid,
+                       filename = paste0(figure_dir_PANIN02B, "/spatial_myeloid_markers.pdf"))
+plot_spatial_gene_list(PANIN02B, features = immune_markers$fibroblast,
+                       filename = paste0(figure_dir_PANIN02B, "/spatial_fibroblast_markers.pdf"))
+plot_spatial_gene_list(PANIN02B, features = immune_markers$class_II_MHC,
+                       filename = paste0(figure_dir_PANIN02B, "/spatial_classII_MHC_markers.pdf"))
+plot_spatial_gene_list(PANIN02B, features = immune_markers$cell_cycle,
+                       filename = paste0(figure_dir_PANIN02B, "/spatial_cycling_markers.pdf"))
+
+for(marker in immune_markers_all){
+  if(marker %in% rownames(PANIN02B)){
+    plot <- SpatialFeaturePlot(PANIN02B, features = marker, alpha = 1)
+    plot_save_pdf(plot = plot,
+                  filename = paste0(figure_dir_PANIN02B, "/marker_", marker, ".pdf"))
+  } else {
+    print(paste0(marker, " not present in data"))
+  }
+}
+
+# PCA analysis
+PANIN02B <- RunPCA(PANIN02B, assay = "SCT")
+elbow_plot <- ElbowPlot(PANIN02B, ndims = 50)
+
+# assess Elbow plot
+elbow_plot
+
+# clustering and embedding based on 20 PCs 
+# 20 dims clustering
+PANIN02B <- FindNeighbors(PANIN02B, reduction = "pca", dims = 1:20)
+suppressWarnings(
+  PANIN02B <- FindClusters(PANIN02B, algorithm = 4, resolution = 0.8)
+)
+# suppressed warnings for legibility on knitted file
+# Warning message:
+## Warning in paste("reticulate", module, "load", sep = "::"): NAs introduced by
+## coercion to integer range
+
+PANIN02B$Leiden_clusters <- PANIN02B$seurat_clusters
+leiden_pal <- colorRamps::matlab.like2(length(levels(Idents(PANIN02B))))
+
+PANIN02B$Leiden_clusters <- PANIN02B$seurat_clusters
+lei_plot <- SpatialDimPlot(PANIN02B, pt.size.factor = 2) +
+  scale_fill_manual(values = leiden_pal) +
+  ggtitle(paste0(seg_name, ": Leiden Clusters"))
+print(lei_plot)
+plot_save_pdf(plot = lei_plot,
+              filename = paste0(figure_dir_PANIN02B, "/spatial_leiden_idents.pdf"))
+plot_highlight_clusters(PANIN02B,
+                        filename = paste0(figure_dir_PANIN02B, "/spatial_leiden_clusters_res_0.8.pdf"))
+
+# Notes on cluster alignment with segment morphology
+# 1 : acinar
+# 2 : boundary of adipose and acinar, may have some acinar bleedover
+# 3 : thick stroma surrounding acinar lobes
+# 4 : acinar, large cytoplasm
+# 5 : ductal cells, PanIN and normal morphology, includes the stroma surrounding them
+# 6 : adipose, there is a bubble at the bottom of the segment that needs removed
+# 7 : Islet
+# 8 : Blood vessel, endothelial
+
+# both PanIN segments from this patient have intresting regions I considered ADM
+# where many small ducts are surrounded by dense stroma. Melissa was also less 
+# familiar with these and suggested we review with our team's pathologist
+
+# plot PCA with cluster labeling
+pca_plot <- DimPlot(PANIN02B, group.by = "Leiden_clusters", reduction = "pca") +
+  ggtitle(paste0(seg_name, " PCA: Leiden Clusters"))
+print(pca_plot)
+plot_save_pdf(pca_plot,
+              filename = paste0(figure_dir_PANIN02B, "/pca_leiden_clusters.pdf"))
+
+# compute UMAP
+PANIN02B <- RunUMAP(PANIN02B, reduction = "pca", dims = 1:25)
+umap_plot <- DimPlot(PANIN02B, group.by = "Leiden_clusters", reduction = "umap", label = TRUE) +
+  ggtitle(paste0(seg_name, " UMAP: Leiden Clusters"))
+print(umap_plot)
+plot_save_pdf(umap_plot,
+              filename = paste0(figure_dir_PANIN02B, "/umap_leiden_clusters.pdf"))
+
+# save segment with low-dim embeddings
+saveRDS(PANIN02B,
+        file = paste0(results_dir, "/", seg_name, "_preprocessed.rds"))
+
+# remove the seurat object to save memory for the other segments
+rm(PANIN02B)
+```
+
+```{r Segment: PDAC02}
+seg_name <- "PDAC02"
+PDAC02_file <- rds_list[grep("^PDAC02", rds_list)]
+figure_dir_PDAC02 <- paste0(figure_dir, "/", seg_name)
+if(!dir.exists(figure_dir_PDAC02)){
+  dir.create(figure_dir_PDAC02)
+}
+
+PDAC02 <- readRDS(paste0(data_dir, "/", PDAC02_file))
+
+PDAC02 <- scale_sct(PDAC02)
+# list top 20 spatially variable genes
+suppressWarnings(
+      top20_space_var <- head(SpatiallyVariableFeatures(
+        PDAC02, selection.method = "markvariogram"), 20)
+    )
+print(top20_space_var)
+plot_spatial_gene_list(
+  PDAC02,
+  features = top20_space_var,
+  filename = paste0(figure_dir_PDAC02,"/spatial_variable_genes.pdf")
+  )
+plot_spatial_gene_list(PDAC02, features = pancreas_markers$alpha,
+                       filename = paste0(figure_dir_PDAC02, "/spatial_alpha_markers.pdf"))
+plot_spatial_gene_list(PDAC02, features = pancreas_markers$beta,
+                       filename = paste0(figure_dir_PDAC02, "/spatial_beta_markers.pdf"))
+plot_spatial_gene_list(PDAC02, features = pancreas_markers$delta,
+                       filename = paste0(figure_dir_PDAC02, "/spatial_delta_markers.pdf"))
+plot_spatial_gene_list(PDAC02, features = pancreas_markers$polypeptide,
+                       filename = paste0(figure_dir_PDAC02, "/spatial_polypeptide_markers.pdf"))
+plot_spatial_gene_list(PDAC02, features = pancreas_markers$acinar,
+                       filename = paste0(figure_dir_PDAC02, "/spatial_acinar_markers.pdf"))
+plot_spatial_gene_list(PDAC02, features = pancreas_markers$ductal,
+                       filename = paste0(figure_dir_PDAC02, "/spatial_ductal_markers.pdf"))
+plot_spatial_gene_list(PDAC02, features = pancreas_markers$mesenchymal,
+                       filename = paste0(figure_dir_PDAC02, "/spatial_mesenchymal_markers.pdf"))
+plot_spatial_gene_list(PDAC02, features = immune_markers$T_cell,
+                       filename = paste0(figure_dir_PDAC02, "/spatial_Tcell_markers.pdf"))
+plot_spatial_gene_list(PDAC02, features = immune_markers$B_cell,
+                       filename = paste0(figure_dir_PDAC02, "/spatial_Bcell_markers.pdf"))
+plot_spatial_gene_list(PDAC02, features = immune_markers$myeloid,
+                       filename = paste0(figure_dir_PDAC02, "/spatial_myeloid_markers.pdf"))
+plot_spatial_gene_list(PDAC02, features = immune_markers$fibroblast,
+                       filename = paste0(figure_dir_PDAC02, "/spatial_fibroblast_markers.pdf"))
+plot_spatial_gene_list(PDAC02, features = immune_markers$class_II_MHC,
+                       filename = paste0(figure_dir_PDAC02, "/spatial_classII_MHC_markers.pdf"))
+plot_spatial_gene_list(PDAC02, features = immune_markers$cell_cycle,
+                       filename = paste0(figure_dir_PDAC02, "/spatial_cycling_markers.pdf"))
+
+for(marker in immune_markers_all){
+  if(marker %in% rownames(PDAC02)){
+    plot <- SpatialFeaturePlot(PDAC02, features = marker, alpha = 1)
+    plot_save_pdf(plot = plot,
+                  filename = paste0(figure_dir_PDAC02, "/marker_", marker, ".pdf"))
+  } else {
+    print(paste0(marker, " not present in data"))
+  }
+}
+
+# PCA analysis
+PDAC02 <- RunPCA(PDAC02, assay = "SCT")
+elbow_plot <- ElbowPlot(PDAC02, ndims = 50)
+
+# assess Elbow plot
+elbow_plot
+# this segment is intensely fibrotic with overall low counts. Almost all variation
+# is captured in 10 PCs
+
+# clustering and embedding based on 20 PCs 
+# 20 dims clustering
+PDAC02 <- FindNeighbors(PDAC02, reduction = "pca", dims = 1:20)
+suppressWarnings(
+  PDAC02 <- FindClusters(PDAC02, algorithm = 4, resolution = 0.8)
+)
+# suppressed warnings for legibility on knitted file
+# Warning message:
+## Warning in paste("reticulate", module, "load", sep = "::"): NAs introduced by
+## coercion to integer range
+
+PDAC02$Leiden_clusters <- PDAC02$seurat_clusters
+leiden_pal <- colorRamps::matlab.like2(length(levels(Idents(PDAC02))))
+
+PDAC02$Leiden_clusters <- PDAC02$seurat_clusters
+lei_plot <- SpatialDimPlot(PDAC02, pt.size.factor = 2) +
+  scale_fill_manual(values = leiden_pal) +
+  ggtitle(paste0(seg_name, ": Leiden Clusters"))
+print(lei_plot)
+plot_save_pdf(plot = lei_plot,
+              filename = paste0(figure_dir_PDAC02, "/spatial_leiden_idents.pdf"))
+plot_highlight_clusters(PDAC02,
+                        filename = paste0(figure_dir_PDAC02, "/spatial_leiden_clusters_res_0.8.pdf"))
+
+# Notes on cluster alignment with segment morphology
+# 1 : ductal, severe dysplasia, large vacuoles
+# 2 : portions of stroma surrounding ducts
+# 3 : dense stroma
+# 4 : mix of stroma with lumen of several large ducts
+# 5 : Stroma
+# 6 : Blood vessels, many erythrocytes included
+# 7 : ductal cells
+# 8 : islet, structure is breaking down with large vacuoles in many cells
+# 9 : stroma boardering acinar cells
+# 10 : ductal, clearly malignant based on morphology
+
+# most clusters still find real structure, although cluster 4 is a strange mix
+
+# plot PCA with cluster labeling
+pca_plot <- DimPlot(PDAC02, group.by = "Leiden_clusters", reduction = "pca") +
+  ggtitle(paste0(seg_name, " PCA: Leiden Clusters"))
+print(pca_plot)
+plot_save_pdf(pca_plot,
+              filename = paste0(figure_dir_PDAC02, "/pca_leiden_clusters.pdf"))
+
+# compute UMAP
+PDAC02 <- RunUMAP(PDAC02, reduction = "pca", dims = 1:25)
+umap_plot <- DimPlot(PDAC02, group.by = "Leiden_clusters", reduction = "umap", label = TRUE) +
+  ggtitle(paste0(seg_name, " UMAP: Leiden Clusters"))
+print(umap_plot)
+plot_save_pdf(umap_plot,
+              filename = paste0(figure_dir_PDAC02, "/umap_leiden_clusters.pdf"))
+# UMAP shows intermixing of ductal and stroma clusters while the acinar and
+# islets form distinct arms of the embedding
+
+# save segment with low-dim embeddings
+saveRDS(PDAC02,
+        file = paste0(results_dir, "/", seg_name, "_preprocessed.rds"))
+
+# remove the seurat object to save memory for the other segments
+rm(PDAC02)
+```
+
+```{r Segment: CP03}
+seg_name <- "CP03"
+CP03_file <- rds_list[grep("^CP03", rds_list)]
+figure_dir_CP03 <- paste0(figure_dir, "/", seg_name)
+if(!dir.exists(figure_dir_CP03)){
+  dir.create(figure_dir_CP03)
+}
+
+CP03 <- readRDS(paste0(data_dir, "/", CP03_file))
+
+CP03 <- scale_sct(CP03)
+# list top 20 spatially variable genes
+suppressWarnings(
+      top20_space_var <- head(SpatiallyVariableFeatures(
+        CP03, selection.method = "markvariogram"), 20)
+    )
+print(top20_space_var)
+plot_spatial_gene_list(
+  CP03,
+  features = top20_space_var,
+  filename = paste0(figure_dir_CP03,"/spatial_variable_genes.pdf")
+  )
+plot_spatial_gene_list(CP03, features = pancreas_markers$alpha,
+                       filename = paste0(figure_dir_CP03, "/spatial_alpha_markers.pdf"))
+plot_spatial_gene_list(CP03, features = pancreas_markers$beta,
+                       filename = paste0(figure_dir_CP03, "/spatial_beta_markers.pdf"))
+plot_spatial_gene_list(CP03, features = pancreas_markers$delta,
+                       filename = paste0(figure_dir_CP03, "/spatial_delta_markers.pdf"))
+plot_spatial_gene_list(CP03, features = pancreas_markers$polypeptide,
+                       filename = paste0(figure_dir_CP03, "/spatial_polypeptide_markers.pdf"))
+plot_spatial_gene_list(CP03, features = pancreas_markers$acinar,
+                       filename = paste0(figure_dir_CP03, "/spatial_acinar_markers.pdf"))
+plot_spatial_gene_list(CP03, features = pancreas_markers$ductal,
+                       filename = paste0(figure_dir_CP03, "/spatial_ductal_markers.pdf"))
+plot_spatial_gene_list(CP03, features = pancreas_markers$mesenchymal,
+                       filename = paste0(figure_dir_CP03, "/spatial_mesenchymal_markers.pdf"))
+plot_spatial_gene_list(CP03, features = immune_markers$T_cell,
+                       filename = paste0(figure_dir_CP03, "/spatial_Tcell_markers.pdf"))
+plot_spatial_gene_list(CP03, features = immune_markers$B_cell,
+                       filename = paste0(figure_dir_CP03, "/spatial_Bcell_markers.pdf"))
+plot_spatial_gene_list(CP03, features = immune_markers$myeloid,
+                       filename = paste0(figure_dir_CP03, "/spatial_myeloid_markers.pdf"))
+plot_spatial_gene_list(CP03, features = immune_markers$fibroblast,
+                       filename = paste0(figure_dir_CP03, "/spatial_fibroblast_markers.pdf"))
+plot_spatial_gene_list(CP03, features = immune_markers$class_II_MHC,
+                       filename = paste0(figure_dir_CP03, "/spatial_classII_MHC_markers.pdf"))
+plot_spatial_gene_list(CP03, features = immune_markers$cell_cycle,
+                       filename = paste0(figure_dir_CP03, "/spatial_cycling_markers.pdf"))
+
+for(marker in immune_markers_all){
+  if(marker %in% rownames(CP03)){
+    plot <- SpatialFeaturePlot(CP03, features = marker, alpha = 1)
+    plot_save_pdf(plot = plot,
+                  filename = paste0(figure_dir_CP03, "/marker_", marker, ".pdf"))
+  } else {
+    print(paste0(marker, " not present in data"))
+  }
+}
+
+# PCA analysis
+CP03 <- RunPCA(CP03, assay = "SCT")
+elbow_plot <- ElbowPlot(CP03, ndims = 50)
+
+# assess Elbow plot
+elbow_plot
+
+# clustering and embedding based on 20 PCs 
+# 20 dims clustering
+CP03 <- FindNeighbors(CP03, reduction = "pca", dims = 1:20)
+suppressWarnings(
+  CP03 <- FindClusters(CP03, algorithm = 4, resolution = 0.8)
+)
+# suppressed warnings for legibility on knitted file
+# Warning message:
+## Warning in paste("reticulate", module, "load", sep = "::"): NAs introduced by
+## coercion to integer range
+
+CP03$Leiden_clusters <- CP03$seurat_clusters
+leiden_pal <- colorRamps::matlab.like2(length(levels(Idents(CP03))))
+
+CP03$Leiden_clusters <- CP03$seurat_clusters
+lei_plot <- SpatialDimPlot(CP03, pt.size.factor = 2) +
+  scale_fill_manual(values = leiden_pal) +
+  ggtitle(paste0(seg_name, ": Leiden Clusters"))
+print(lei_plot)
+plot_save_pdf(plot = lei_plot,
+              filename = paste0(figure_dir_CP03, "/spatial_leiden_idents.pdf"))
+plot_highlight_clusters(CP03,
+                        filename = paste0(figure_dir_CP03, "/spatial_leiden_clusters_res_0.8.pdf"))
+
+# Notes on cluster alignment with segment morphology
+# 1 : acinar, most borders stroma
+# 2 : acinar, large cytoplasm
+# 3 : adipose
+# 4 : acinar, almost exclusive to left side
+# 5 : pancreatitis lesion
+# 6 : stroma surrounding blood vessels
+# 7 : stroma surrounding pacreatitis lesion
+# 8 : blood vessels
+# 9 : islet
+# 10 : small subset of acinar cells, difference is not obvious to me
+# 11 : two ducts, the duct in the pancreatitis looks like panin
+
+# plot PCA with cluster labeling
+pca_plot <- DimPlot(CP03, group.by = "Leiden_clusters", reduction = "pca") +
+  ggtitle(paste0(seg_name, " PCA: Leiden Clusters"))
+print(pca_plot)
+plot_save_pdf(pca_plot,
+              filename = paste0(figure_dir_CP03, "/pca_leiden_clusters.pdf"))
+
+# compute UMAP
+CP03 <- RunUMAP(CP03, reduction = "pca", dims = 1:20)
+umap_plot <- DimPlot(CP03, group.by = "Leiden_clusters", reduction = "umap", label = TRUE) +
+  ggtitle(paste0(seg_name, " UMAP: Leiden Clusters"))
+print(umap_plot)
+plot_save_pdf(umap_plot,
+              filename = paste0(figure_dir_CP03, "/umap_leiden_clusters.pdf"))
+
+# save segment with low-dim embeddings
+saveRDS(CP03,
+        file = paste0(results_dir, "/", seg_name, "_preprocessed.rds"))
+
+# remove the seurat object to save memory for the other segments
+rm(CP03)
+```
+
+```{r Segment: NRL03}
+seg_name <- "NRL03"
+NRL03_file <- rds_list[grep("^NRL03", rds_list)]
+figure_dir_NRL03 <- paste0(figure_dir, "/", seg_name)
+if(!dir.exists(figure_dir_NRL03)){
+  dir.create(figure_dir_NRL03)
+}
+
+NRL03 <- readRDS(paste0(data_dir, "/", NRL03_file))
+
+NRL03 <- scale_sct(NRL03)
+# list top 20 spatially variable genes
+suppressWarnings(
+      top20_space_var <- head(SpatiallyVariableFeatures(
+        NRL03, selection.method = "markvariogram"), 20)
+    )
+print(top20_space_var)
+plot_spatial_gene_list(
+  NRL03,
+  features = top20_space_var,
+  filename = paste0(figure_dir_NRL03,"/spatial_variable_genes.pdf")
+  )
+plot_spatial_gene_list(NRL03, features = pancreas_markers$alpha,
+                       filename = paste0(figure_dir_NRL03, "/spatial_alpha_markers.pdf"))
+plot_spatial_gene_list(NRL03, features = pancreas_markers$beta,
+                       filename = paste0(figure_dir_NRL03, "/spatial_beta_markers.pdf"))
+plot_spatial_gene_list(NRL03, features = pancreas_markers$delta,
+                       filename = paste0(figure_dir_NRL03, "/spatial_delta_markers.pdf"))
+plot_spatial_gene_list(NRL03, features = pancreas_markers$polypeptide,
+                       filename = paste0(figure_dir_NRL03, "/spatial_polypeptide_markers.pdf"))
+plot_spatial_gene_list(NRL03, features = pancreas_markers$acinar,
+                       filename = paste0(figure_dir_NRL03, "/spatial_acinar_markers.pdf"))
+plot_spatial_gene_list(NRL03, features = pancreas_markers$ductal,
+                       filename = paste0(figure_dir_NRL03, "/spatial_ductal_markers.pdf"))
+plot_spatial_gene_list(NRL03, features = pancreas_markers$mesenchymal,
+                       filename = paste0(figure_dir_NRL03, "/spatial_mesenchymal_markers.pdf"))
+plot_spatial_gene_list(NRL03, features = immune_markers$T_cell,
+                       filename = paste0(figure_dir_NRL03, "/spatial_Tcell_markers.pdf"))
+plot_spatial_gene_list(NRL03, features = immune_markers$B_cell,
+                       filename = paste0(figure_dir_NRL03, "/spatial_Bcell_markers.pdf"))
+plot_spatial_gene_list(NRL03, features = immune_markers$myeloid,
+                       filename = paste0(figure_dir_NRL03, "/spatial_myeloid_markers.pdf"))
+plot_spatial_gene_list(NRL03, features = immune_markers$fibroblast,
+                       filename = paste0(figure_dir_NRL03, "/spatial_fibroblast_markers.pdf"))
+plot_spatial_gene_list(NRL03, features = immune_markers$class_II_MHC,
+                       filename = paste0(figure_dir_NRL03, "/spatial_classII_MHC_markers.pdf"))
+plot_spatial_gene_list(NRL03, features = immune_markers$cell_cycle,
+                       filename = paste0(figure_dir_NRL03, "/spatial_cycling_markers.pdf"))
+
+for(marker in immune_markers_all){
+  if(marker %in% rownames(NRL03)){
+    plot <- SpatialFeaturePlot(NRL03, features = marker, alpha = 1)
+    plot_save_pdf(plot = plot,
+                  filename = paste0(figure_dir_NRL03, "/marker_", marker, ".pdf"))
+  } else {
+    print(paste0(marker, " not present in data"))
+  }
+}
+
+# PCA analysis
+NRL03 <- RunPCA(NRL03, assay = "SCT")
+elbow_plot <- ElbowPlot(NRL03, ndims = 50)
+
+# assess Elbow plot
+elbow_plot
+
+# clustering and embedding based on 20 PCs 
+# 20 dims clustering
+NRL03 <- FindNeighbors(NRL03, reduction = "pca", dims = 1:20)
+suppressWarnings(
+  NRL03 <- FindClusters(NRL03, algorithm = 4, resolution = 0.8)
+)
+# suppressed warnings for legibility on knitted file
+# Warning message:
+## Warning in paste("reticulate", module, "load", sep = "::"): NAs introduced by
+## coercion to integer range
+
+NRL03$Leiden_clusters <- NRL03$seurat_clusters
+leiden_pal <- colorRamps::matlab.like2(length(levels(Idents(NRL03))))
+
+NRL03$Leiden_clusters <- NRL03$seurat_clusters
+lei_plot <- SpatialDimPlot(NRL03, pt.size.factor = 2) +
+  scale_fill_manual(values = leiden_pal) +
+  ggtitle(paste0(seg_name, ": Leiden Clusters"))
+print(lei_plot)
+plot_save_pdf(plot = lei_plot,
+              filename = paste0(figure_dir_NRL03, "/spatial_leiden_idents.pdf"))
+plot_highlight_clusters(NRL03,
+                        filename = paste0(figure_dir_NRL03, "/spatial_leiden_clusters_res_0.8.pdf"))
+
+# Notes on cluster alignment with segment morphology
+# 1 : Mixed cluster of some acinar cells and large blood vessels. Region has very low counts, even in the acinar cells.
+# 2 : acinar
+# 3 : acinar
+# 4 : acinar
+# 5 : blood vessels
+# 6 : islets, appears to have some bleed over to neighboring spots
+# 7 : mostly acinar, but includes some vessel collagen
+# 8 : acinar lobe with more stroma between cells
+# 9 : stroma around ducts and between acinar cells
+
+# This is one of the first segments to have multiple clusters that include multiple
+# cell types. There are multiple divisions of the acinar cells that don't have an
+# obvious distinction. The largest cluster is distinguished by overall very low counts.
+
+# plot PCA with cluster labeling
+pca_plot <- DimPlot(NRL03, group.by = "Leiden_clusters", reduction = "pca") +
+  ggtitle(paste0(seg_name, " PCA: Leiden Clusters"))
+print(pca_plot)
+plot_save_pdf(pca_plot,
+              filename = paste0(figure_dir_NRL03, "/pca_leiden_clusters.pdf"))
+
+# compute UMAP
+NRL03 <- RunUMAP(NRL03, reduction = "pca", dims = 1:20)
+umap_plot <- DimPlot(NRL03, group.by = "Leiden_clusters", reduction = "umap", label = TRUE) +
+  ggtitle(paste0(seg_name, " UMAP: Leiden Clusters"))
+print(umap_plot)
+plot_save_pdf(umap_plot,
+              filename = paste0(figure_dir_NRL03, "/umap_leiden_clusters.pdf"))
+
+# save segment with low-dim embeddings
+saveRDS(NRL03,
+        file = paste0(results_dir, "/", seg_name, "_preprocessed.rds"))
+
+# remove the seurat object to save memory for the other segments
+rm(NRL03)
+```
+
+```{r Segment: PANIN03}
+seg_name <- "PANIN03"
+PANIN03_file <- rds_list[grep("^PANIN03", rds_list)]
+figure_dir_PANIN03 <- paste0(figure_dir, "/", seg_name)
+if(!dir.exists(figure_dir_PANIN03)){
+  dir.create(figure_dir_PANIN03)
+}
+
+PANIN03 <- readRDS(paste0(data_dir, "/", PANIN03_file))
+
+PANIN03 <- scale_sct(PANIN03)
+# list top 20 spatially variable genes
+suppressWarnings(
+      top20_space_var <- head(SpatiallyVariableFeatures(
+        PANIN03, selection.method = "markvariogram"), 20)
+    )
+print(top20_space_var)
+plot_spatial_gene_list(
+  PANIN03,
+  features = top20_space_var,
+  filename = paste0(figure_dir_PANIN03,"/spatial_variable_genes.pdf")
+  )
+plot_spatial_gene_list(PANIN03, features = pancreas_markers$alpha,
+                       filename = paste0(figure_dir_PANIN03, "/spatial_alpha_markers.pdf"))
+plot_spatial_gene_list(PANIN03, features = pancreas_markers$beta,
+                       filename = paste0(figure_dir_PANIN03, "/spatial_beta_markers.pdf"))
+plot_spatial_gene_list(PANIN03, features = pancreas_markers$delta,
+                       filename = paste0(figure_dir_PANIN03, "/spatial_delta_markers.pdf"))
+plot_spatial_gene_list(PANIN03, features = pancreas_markers$polypeptide,
+                       filename = paste0(figure_dir_PANIN03, "/spatial_polypeptide_markers.pdf"))
+plot_spatial_gene_list(PANIN03, features = pancreas_markers$acinar,
+                       filename = paste0(figure_dir_PANIN03, "/spatial_acinar_markers.pdf"))
+plot_spatial_gene_list(PANIN03, features = pancreas_markers$ductal,
+                       filename = paste0(figure_dir_PANIN03, "/spatial_ductal_markers.pdf"))
+plot_spatial_gene_list(PANIN03, features = pancreas_markers$mesenchymal,
+                       filename = paste0(figure_dir_PANIN03, "/spatial_mesenchymal_markers.pdf"))
+plot_spatial_gene_list(PANIN03, features = immune_markers$T_cell,
+                       filename = paste0(figure_dir_PANIN03, "/spatial_Tcell_markers.pdf"))
+plot_spatial_gene_list(PANIN03, features = immune_markers$B_cell,
+                       filename = paste0(figure_dir_PANIN03, "/spatial_Bcell_markers.pdf"))
+plot_spatial_gene_list(PANIN03, features = immune_markers$myeloid,
+                       filename = paste0(figure_dir_PANIN03, "/spatial_myeloid_markers.pdf"))
+plot_spatial_gene_list(PANIN03, features = immune_markers$fibroblast,
+                       filename = paste0(figure_dir_PANIN03, "/spatial_fibroblast_markers.pdf"))
+plot_spatial_gene_list(PANIN03, features = immune_markers$class_II_MHC,
+                       filename = paste0(figure_dir_PANIN03, "/spatial_classII_MHC_markers.pdf"))
+plot_spatial_gene_list(PANIN03, features = immune_markers$cell_cycle,
+                       filename = paste0(figure_dir_PANIN03, "/spatial_cycling_markers.pdf"))
+
+for(marker in immune_markers_all){
+  if(marker %in% rownames(PANIN03)){
+    plot <- SpatialFeaturePlot(PANIN03, features = marker, alpha = 1)
+    plot_save_pdf(plot = plot,
+                  filename = paste0(figure_dir_PANIN03, "/marker_", marker, ".pdf"))
+  } else {
+    print(paste0(marker, " not present in data"))
+  }
+}
+
+# PCA analysis
+PANIN03 <- RunPCA(PANIN03, assay = "SCT")
+elbow_plot <- ElbowPlot(PANIN03, ndims = 50)
+
+# assess Elbow plot
+elbow_plot
+
+# clustering and embedding based on 20 PCs 
+# 20 dims clustering
+PANIN03 <- FindNeighbors(PANIN03, reduction = "pca", dims = 1:20)
+suppressWarnings(
+  PANIN03 <- FindClusters(PANIN03, algorithm = 4, resolution = 0.8)
+)
+# suppressed warnings for legibility on knitted file
+# Warning message:
+## Warning in paste("reticulate", module, "load", sep = "::"): NAs introduced by
+## coercion to integer range
+
+PANIN03$Leiden_clusters <- PANIN03$seurat_clusters
+leiden_pal <- colorRamps::matlab.like2(length(levels(Idents(PANIN03))))
+
+PANIN03$Leiden_clusters <- PANIN03$seurat_clusters
+lei_plot <- SpatialDimPlot(PANIN03, pt.size.factor = 2) +
+  scale_fill_manual(values = leiden_pal) +
+  ggtitle(paste0(seg_name, ": Leiden Clusters"))
+print(lei_plot)
+plot_save_pdf(plot = lei_plot,
+              filename = paste0(figure_dir_PANIN03, "/spatial_leiden_idents.pdf"))
+plot_highlight_clusters(PANIN03,
+                        filename = paste0(figure_dir_PANIN03, "/spatial_leiden_clusters_res_0.8.pdf"))
+
+# Notes on cluster alignment with segment morphology
+# 1 : acinar cells bordering stroma in upper area of segment
+# 2 : acinar cells bordering stroma in lower area of segment
+# 3 : acinar
+# 4 : fragmented acinar cells, lower expression of acinar markers
+# 5 : acinar
+# 6 : acinar
+# 7 : acinar
+# 8 : PanIN duct and surrounding collagen
+# 9 : acinar
+# 10 : acinar, neighbors the panin duct
+# 11 : islet
+
+# lower right is made up acinar cells and stroma that have more gaps of open
+# space. May be an artefact of segment prep or thickness of the slice.
+
+# plot PCA with cluster labeling
+pca_plot <- DimPlot(PANIN03, group.by = "Leiden_clusters", reduction = "pca") +
+  ggtitle(paste0(seg_name, " PCA: Leiden Clusters"))
+print(pca_plot)
+plot_save_pdf(pca_plot,
+              filename = paste0(figure_dir_PANIN03, "/pca_leiden_clusters.pdf"))
+
+# compute UMAP
+PANIN03 <- RunUMAP(PANIN03, reduction = "pca", dims = 1:20)
+umap_plot <- DimPlot(PANIN03, group.by = "Leiden_clusters", reduction = "umap", label = TRUE) +
+  ggtitle(paste0(seg_name, " UMAP: Leiden Clusters"))
+print(umap_plot)
+plot_save_pdf(umap_plot,
+              filename = paste0(figure_dir_PANIN03, "/umap_leiden_clusters.pdf"))
+
+# save segment with low-dim embeddings
+saveRDS(PANIN03,
+        file = paste0(results_dir, "/", seg_name, "_preprocessed.rds"))
+
+# remove the seurat object to save memory for the other segments
+rm(PANIN03)
+```
+
+```{r Segment: PDAC03}
+seg_name <- "PDAC03"
+PDAC03_file <- rds_list[grep("^PDAC03", rds_list)]
+figure_dir_PDAC03 <- paste0(figure_dir, "/", seg_name)
+if(!dir.exists(figure_dir_PDAC03)){
+  dir.create(figure_dir_PDAC03)
+}
+
+PDAC03 <- readRDS(paste0(data_dir, "/", PDAC03_file))
+
+PDAC03 <- scale_sct(PDAC03)
+# list top 20 spatially variable genes
+suppressWarnings(
+      top20_space_var <- head(SpatiallyVariableFeatures(
+        PDAC03, selection.method = "markvariogram"), 20)
+    )
+print(top20_space_var)
+plot_spatial_gene_list(
+  PDAC03,
+  features = top20_space_var,
+  filename = paste0(figure_dir_PDAC03,"/spatial_variable_genes.pdf")
+  )
+plot_spatial_gene_list(PDAC03, features = pancreas_markers$alpha,
+                       filename = paste0(figure_dir_PDAC03, "/spatial_alpha_markers.pdf"))
+plot_spatial_gene_list(PDAC03, features = pancreas_markers$beta,
+                       filename = paste0(figure_dir_PDAC03, "/spatial_beta_markers.pdf"))
+plot_spatial_gene_list(PDAC03, features = pancreas_markers$delta,
+                       filename = paste0(figure_dir_PDAC03, "/spatial_delta_markers.pdf"))
+plot_spatial_gene_list(PDAC03, features = pancreas_markers$polypeptide,
+                       filename = paste0(figure_dir_PDAC03, "/spatial_polypeptide_markers.pdf"))
+plot_spatial_gene_list(PDAC03, features = pancreas_markers$acinar,
+                       filename = paste0(figure_dir_PDAC03, "/spatial_acinar_markers.pdf"))
+plot_spatial_gene_list(PDAC03, features = pancreas_markers$ductal,
+                       filename = paste0(figure_dir_PDAC03, "/spatial_ductal_markers.pdf"))
+plot_spatial_gene_list(PDAC03, features = pancreas_markers$mesenchymal,
+                       filename = paste0(figure_dir_PDAC03, "/spatial_mesenchymal_markers.pdf"))
+plot_spatial_gene_list(PDAC03, features = immune_markers$T_cell,
+                       filename = paste0(figure_dir_PDAC03, "/spatial_Tcell_markers.pdf"))
+plot_spatial_gene_list(PDAC03, features = immune_markers$B_cell,
+                       filename = paste0(figure_dir_PDAC03, "/spatial_Bcell_markers.pdf"))
+plot_spatial_gene_list(PDAC03, features = immune_markers$myeloid,
+                       filename = paste0(figure_dir_PDAC03, "/spatial_myeloid_markers.pdf"))
+plot_spatial_gene_list(PDAC03, features = immune_markers$fibroblast,
+                       filename = paste0(figure_dir_PDAC03, "/spatial_fibroblast_markers.pdf"))
+plot_spatial_gene_list(PDAC03, features = immune_markers$class_II_MHC,
+                       filename = paste0(figure_dir_PDAC03, "/spatial_classII_MHC_markers.pdf"))
+plot_spatial_gene_list(PDAC03, features = immune_markers$cell_cycle,
+                       filename = paste0(figure_dir_PDAC03, "/spatial_cycling_markers.pdf"))
+
+for(marker in immune_markers_all){
+  if(marker %in% rownames(PDAC03)){
+    plot <- SpatialFeaturePlot(PDAC03, features = marker, alpha = 1)
+    plot_save_pdf(plot = plot,
+                  filename = paste0(figure_dir_PDAC03, "/marker_", marker, ".pdf"))
+  } else {
+    print(paste0(marker, " not present in data"))
+  }
+}
+
+# PCA analysis
+PDAC03 <- RunPCA(PDAC03, assay = "SCT")
+elbow_plot <- ElbowPlot(PDAC03, ndims = 50)
+
+# assess Elbow plot
+elbow_plot
+
+# clustering and embedding based on 25 PCs 
+# 25 dims clustering
+PDAC03 <- FindNeighbors(PDAC03, reduction = "pca", dims = 1:25)
+suppressWarnings(
+  PDAC03 <- FindClusters(PDAC03, algorithm = 4, resolution = 0.8)
+)
+# suppressed warnings for legibility on knitted file
+# Warning message:
+## Warning in paste("reticulate", module, "load", sep = "::"): NAs introduced by
+## coercion to integer range
+
+PDAC03$Leiden_clusters <- PDAC03$seurat_clusters
+leiden_pal <- colorRamps::matlab.like2(length(levels(Idents(PDAC03))))
+
+PDAC03$Leiden_clusters <- PDAC03$seurat_clusters
+lei_plot <- SpatialDimPlot(PDAC03, pt.size.factor = 2) +
+  scale_fill_manual(values = leiden_pal) +
+  ggtitle(paste0(seg_name, ": Leiden Clusters"))
+print(lei_plot)
+plot_save_pdf(plot = lei_plot,
+              filename = paste0(figure_dir_PDAC03, "/spatial_leiden_idents.pdf"))
+plot_highlight_clusters(PDAC03,
+                        filename = paste0(figure_dir_PDAC03, "/spatial_leiden_clusters_res_0.8.pdf"))
+
+# Notes on cluster alignment with segment morphology
+# 1 : cancerous duct
+# 2 : cancerous duct
+# 3 : stroma
+# 4 : cancerous duct, more tears between cells
+# 5 : cancerous duct
+# 6 : cancerous duct, surrounded by stroma
+# 7 : stroma between cancerous ducts
+# 8 : blood vessels, two large vessels in the center
+# 9 : dense stroma, few nuclei
+# 10 : cancerous duct
+# 11 : stroma, surrounds one of the blood vessels
+
+# clusters of cancer cells are mostly continuou, but some are more dispersed
+# amongst the many cancer cell ducts.
+
+# lower right is made up acinar cells and stroma that have more gaps of open
+# space. May be an artefact of segment prep or thickness of the slice.
+
+# plot PCA with cluster labeling
+pca_plot <- DimPlot(PDAC03, group.by = "Leiden_clusters", reduction = "pca") +
+  ggtitle(paste0(seg_name, " PCA: Leiden Clusters"))
+print(pca_plot)
+plot_save_pdf(pca_plot,
+              filename = paste0(figure_dir_PDAC03, "/pca_leiden_clusters.pdf"))
+
+# compute UMAP
+PDAC03 <- RunUMAP(PDAC03, reduction = "pca", dims = 1:25)
+umap_plot <- DimPlot(PDAC03, group.by = "Leiden_clusters", reduction = "umap", label = TRUE) +
+  ggtitle(paste0(seg_name, " UMAP: Leiden Clusters"))
+print(umap_plot)
+plot_save_pdf(umap_plot,
+              filename = paste0(figure_dir_PDAC03, "/umap_leiden_clusters.pdf"))
+
+# save segment with low-dim embeddings
+saveRDS(PDAC03,
+        file = paste0(results_dir, "/", seg_name, "_preprocessed.rds"))
+
+# remove the seurat object to save memory for the other segments
+rm(PDAC03)
+```
+
+```{r Segment: CP04}
+seg_name <- "CP04"
+CP04_file <- rds_list[grep("^CP04", rds_list)]
+figure_dir_CP04 <- paste0(figure_dir, "/", seg_name)
+if(!dir.exists(figure_dir_CP04)){
+  dir.create(figure_dir_CP04)
+}
+
+CP04 <- readRDS(paste0(data_dir, "/", CP04_file))
+
+CP04 <- scale_sct(CP04)
+# list top 20 spatially variable genes
+suppressWarnings(
+      top20_space_var <- head(SpatiallyVariableFeatures(
+        CP04, selection.method = "markvariogram"), 20)
+    )
+print(top20_space_var)
+plot_spatial_gene_list(
+  CP04,
+  features = top20_space_var,
+  filename = paste0(figure_dir_CP04,"/spatial_variable_genes.pdf")
+  )
+plot_spatial_gene_list(CP04, features = pancreas_markers$alpha,
+                       filename = paste0(figure_dir_CP04, "/spatial_alpha_markers.pdf"))
+plot_spatial_gene_list(CP04, features = pancreas_markers$beta,
+                       filename = paste0(figure_dir_CP04, "/spatial_beta_markers.pdf"))
+plot_spatial_gene_list(CP04, features = pancreas_markers$delta,
+                       filename = paste0(figure_dir_CP04, "/spatial_delta_markers.pdf"))
+plot_spatial_gene_list(CP04, features = pancreas_markers$polypeptide,
+                       filename = paste0(figure_dir_CP04, "/spatial_polypeptide_markers.pdf"))
+plot_spatial_gene_list(CP04, features = pancreas_markers$acinar,
+                       filename = paste0(figure_dir_CP04, "/spatial_acinar_markers.pdf"))
+plot_spatial_gene_list(CP04, features = pancreas_markers$ductal,
+                       filename = paste0(figure_dir_CP04, "/spatial_ductal_markers.pdf"))
+plot_spatial_gene_list(CP04, features = pancreas_markers$mesenchymal,
+                       filename = paste0(figure_dir_CP04, "/spatial_mesenchymal_markers.pdf"))
+plot_spatial_gene_list(CP04, features = immune_markers$T_cell,
+                       filename = paste0(figure_dir_CP04, "/spatial_Tcell_markers.pdf"))
+plot_spatial_gene_list(CP04, features = immune_markers$B_cell,
+                       filename = paste0(figure_dir_CP04, "/spatial_Bcell_markers.pdf"))
+plot_spatial_gene_list(CP04, features = immune_markers$myeloid,
+                       filename = paste0(figure_dir_CP04, "/spatial_myeloid_markers.pdf"))
+plot_spatial_gene_list(CP04, features = immune_markers$fibroblast,
+                       filename = paste0(figure_dir_CP04, "/spatial_fibroblast_markers.pdf"))
+plot_spatial_gene_list(CP04, features = immune_markers$class_II_MHC,
+                       filename = paste0(figure_dir_CP04, "/spatial_classII_MHC_markers.pdf"))
+plot_spatial_gene_list(CP04, features = immune_markers$cell_cycle,
+                       filename = paste0(figure_dir_CP04, "/spatial_cycling_markers.pdf"))
+
+for(marker in immune_markers_all){
+  if(marker %in% rownames(CP04)){
+    plot <- SpatialFeaturePlot(CP04, features = marker, alpha = 1)
+    plot_save_pdf(plot = plot,
+                  filename = paste0(figure_dir_CP04, "/marker_", marker, ".pdf"))
+  } else {
+    print(paste0(marker, " not present in data"))
+  }
+}
+
+# PCA analysis
+CP04 <- RunPCA(CP04, assay = "SCT")
+elbow_plot <- ElbowPlot(CP04, ndims = 50)
+
+# assess Elbow plot
+elbow_plot
+
+# clustering and embedding based on 20 PCs 
+# 20 dims clustering
+CP04 <- FindNeighbors(CP04, reduction = "pca", dims = 1:20)
+suppressWarnings(
+  CP04 <- FindClusters(CP04, algorithm = 4, resolution = 0.8)
+)
+# suppressed warnings for legibility on knitted file
+# Warning message:
+## Warning in paste("reticulate", module, "load", sep = "::"): NAs introduced by
+## coercion to integer range
+
+CP04$Leiden_clusters <- CP04$seurat_clusters
+leiden_pal <- colorRamps::matlab.like2(length(levels(Idents(CP04))))
+
+CP04$Leiden_clusters <- CP04$seurat_clusters
+lei_plot <- SpatialDimPlot(CP04, pt.size.factor = 2) +
+  scale_fill_manual(values = leiden_pal) +
+  ggtitle(paste0(seg_name, ": Leiden Clusters"))
+print(lei_plot)
+plot_save_pdf(plot = lei_plot,
+              filename = paste0(figure_dir_CP04, "/spatial_leiden_idents.pdf"))
+plot_highlight_clusters(CP04,
+                        filename = paste0(figure_dir_CP04, "/spatial_leiden_clusters_res_0.8.pdf"))
+
+# Notes on cluster alignment with segment morphology
+# 1 : inflamed stroma, includes the magenta region in the upper right corner
+# 2 : inflamed stroma
+# 3 : small ducts surrounded by stroma and inflammatory cells
+# 4 : inflamed acinar
+# 5 : stroma, fewer nuclei
+# 6 : stroma surrounding ducts
+# 7 : stroma surrounding blood vessels
+# 8 : ductal cells, forming raised polyps, should review if these are PanIN
+# 9 : ductal cells, more inflamed surroundings than cluster 8
+
+# The ducts captured in this segment are dysplastic with transisions to columnar
+# shape and polyps of cells detaching from the basement membrane. Should be reviewed
+# with Liz for grading as CP or PanIN
+
+# plot PCA with cluster labeling
+pca_plot <- DimPlot(CP04, group.by = "Leiden_clusters", reduction = "pca") +
+  ggtitle(paste0(seg_name, " PCA: Leiden Clusters"))
+print(pca_plot)
+plot_save_pdf(pca_plot,
+              filename = paste0(figure_dir_CP04, "/pca_leiden_clusters.pdf"))
+
+# compute UMAP
+CP04 <- RunUMAP(CP04, reduction = "pca", dims = 1:20)
+umap_plot <- DimPlot(CP04, group.by = "Leiden_clusters", reduction = "umap", label = TRUE) +
+  ggtitle(paste0(seg_name, " UMAP: Leiden Clusters"))
+print(umap_plot)
+plot_save_pdf(umap_plot,
+              filename = paste0(figure_dir_CP04, "/umap_leiden_clusters.pdf"))
+
+# save segment with low-dim embeddings
+saveRDS(CP04,
+        file = paste0(results_dir, "/", seg_name, "_preprocessed.rds"))
+
+# remove the seurat object to save memory for the other segments
+rm(CP04)
+```
+
+```{r Segment: NRL04}
+seg_name <- "NRL04"
+NRL04_file <- rds_list[grep("^NRL04", rds_list)]
+figure_dir_NRL04 <- paste0(figure_dir, "/", seg_name)
+if(!dir.exists(figure_dir_NRL04)){
+  dir.create(figure_dir_NRL04)
+}
+
+NRL04 <- readRDS(paste0(data_dir, "/", NRL04_file))
+
+NRL04 <- scale_sct(NRL04)
+# list top 20 spatially variable genes
+suppressWarnings(
+      top20_space_var <- head(SpatiallyVariableFeatures(
+        NRL04, selection.method = "markvariogram"), 20)
+    )
+print(top20_space_var)
+plot_spatial_gene_list(
+  NRL04,
+  features = top20_space_var,
+  filename = paste0(figure_dir_NRL04,"/spatial_variable_genes.pdf")
+  )
+plot_spatial_gene_list(NRL04, features = pancreas_markers$alpha,
+                       filename = paste0(figure_dir_NRL04, "/spatial_alpha_markers.pdf"))
+plot_spatial_gene_list(NRL04, features = pancreas_markers$beta,
+                       filename = paste0(figure_dir_NRL04, "/spatial_beta_markers.pdf"))
+plot_spatial_gene_list(NRL04, features = pancreas_markers$delta,
+                       filename = paste0(figure_dir_NRL04, "/spatial_delta_markers.pdf"))
+plot_spatial_gene_list(NRL04, features = pancreas_markers$polypeptide,
+                       filename = paste0(figure_dir_NRL04, "/spatial_polypeptide_markers.pdf"))
+plot_spatial_gene_list(NRL04, features = pancreas_markers$acinar,
+                       filename = paste0(figure_dir_NRL04, "/spatial_acinar_markers.pdf"))
+plot_spatial_gene_list(NRL04, features = pancreas_markers$ductal,
+                       filename = paste0(figure_dir_NRL04, "/spatial_ductal_markers.pdf"))
+plot_spatial_gene_list(NRL04, features = pancreas_markers$mesenchymal,
+                       filename = paste0(figure_dir_NRL04, "/spatial_mesenchymal_markers.pdf"))
+plot_spatial_gene_list(NRL04, features = immune_markers$T_cell,
+                       filename = paste0(figure_dir_NRL04, "/spatial_Tcell_markers.pdf"))
+plot_spatial_gene_list(NRL04, features = immune_markers$B_cell,
+                       filename = paste0(figure_dir_NRL04, "/spatial_Bcell_markers.pdf"))
+plot_spatial_gene_list(NRL04, features = immune_markers$myeloid,
+                       filename = paste0(figure_dir_NRL04, "/spatial_myeloid_markers.pdf"))
+plot_spatial_gene_list(NRL04, features = immune_markers$fibroblast,
+                       filename = paste0(figure_dir_NRL04, "/spatial_fibroblast_markers.pdf"))
+plot_spatial_gene_list(NRL04, features = immune_markers$class_II_MHC,
+                       filename = paste0(figure_dir_NRL04, "/spatial_classII_MHC_markers.pdf"))
+plot_spatial_gene_list(NRL04, features = immune_markers$cell_cycle,
+                       filename = paste0(figure_dir_NRL04, "/spatial_cycling_markers.pdf"))
+
+for(marker in immune_markers_all){
+  if(marker %in% rownames(NRL04)){
+    plot <- SpatialFeaturePlot(NRL04, features = marker, alpha = 1)
+    plot_save_pdf(plot = plot,
+                  filename = paste0(figure_dir_NRL04, "/marker_", marker, ".pdf"))
+  } else {
+    print(paste0(marker, " not present in data"))
+  }
+}
+
+# PCA analysis
+NRL04 <- RunPCA(NRL04, assay = "SCT")
+elbow_plot <- ElbowPlot(NRL04, ndims = 50)
+
+# assess Elbow plot
+elbow_plot
+
+# clustering and embedding based on 20 PCs 
+# 20 dims clustering
+NRL04 <- FindNeighbors(NRL04, reduction = "pca", dims = 1:20)
+suppressWarnings(
+  NRL04 <- FindClusters(NRL04, algorithm = 4, resolution = 0.8)
+)
+# suppressed warnings for legibility on knitted file
+# Warning message:
+## Warning in paste("reticulate", module, "load", sep = "::"): NAs introduced by
+## coercion to integer range
+
+NRL04$Leiden_clusters <- NRL04$seurat_clusters
+leiden_pal <- colorRamps::matlab.like2(length(levels(Idents(NRL04))))
+
+NRL04$Leiden_clusters <- NRL04$seurat_clusters
+lei_plot <- SpatialDimPlot(NRL04, pt.size.factor = 2) +
+  scale_fill_manual(values = leiden_pal) +
+  ggtitle(paste0(seg_name, ": Leiden Clusters"))
+print(lei_plot)
+plot_save_pdf(plot = lei_plot,
+              filename = paste0(figure_dir_NRL04, "/spatial_leiden_idents.pdf"))
+plot_highlight_clusters(NRL04,
+                        filename = paste0(figure_dir_NRL04, "/spatial_leiden_clusters_res_0.8.pdf"))
+
+# Notes on cluster alignment with segment morphology
+# 1 : acinar bleedover, marks adipose and stroma regions neighboring acinar cells where higher nCounts than expected were seen
+# 2 : acinar periphery, regions of some lobes than contact the adipose or stomal regions
+# 3 : acinar bordering stroma within the acinar lobes
+# 4 : mostly adipose, but some spots in collagen around ducts was included
+# 5 : acinar
+# 6 : acinar
+# 7 : acinar
+# 8 : acinar
+# 9 : islets, morphology looks different from other segments, but alpha and beta markers are very high
+# 10 : blood vessels, some adipose cells
+# 11 : ductal cells
+# 12 : acinar bordering stroma
+
+# Clusters 5, 6, and 7 show as narrow groupings of spots that subdivide the acinar
+# cells, but they don't form large clumps and I don't see morphology that clearly
+# explains why they clusters seperately.
+# This segment is one of the only to have clear bleed over issues and the acinar
+# cells are subdivied into clusters that don't always follow obvious morpholgy.
+# However, most clusters capture one biologically distinct cell type as we'd prefer.
+
+# plot PCA with cluster labeling
+pca_plot <- DimPlot(NRL04, group.by = "Leiden_clusters", reduction = "pca") +
+  ggtitle(paste0(seg_name, " PCA: Leiden Clusters"))
+print(pca_plot)
+plot_save_pdf(pca_plot,
+              filename = paste0(figure_dir_NRL04, "/pca_leiden_clusters.pdf"))
+
+# compute UMAP
+NRL04 <- RunUMAP(NRL04, reduction = "pca", dims = 1:20)
+umap_plot <- DimPlot(NRL04, group.by = "Leiden_clusters", reduction = "umap", label = TRUE) +
+  ggtitle(paste0(seg_name, " UMAP: Leiden Clusters"))
+print(umap_plot)
+plot_save_pdf(umap_plot,
+              filename = paste0(figure_dir_NRL04, "/umap_leiden_clusters.pdf"))
+
+# save segment with low-dim embeddings
+saveRDS(NRL04,
+        file = paste0(results_dir, "/", seg_name, "_preprocessed.rds"))
+
+# remove the seurat object to save memory for the other segments
+rm(NRL04)
+```
+
+```{r Segment: PANIN04}
+seg_name <- "PANIN04"
+PANIN04_file <- rds_list[grep("^PANIN04", rds_list)]
+figure_dir_PANIN04 <- paste0(figure_dir, "/", seg_name)
+if(!dir.exists(figure_dir_PANIN04)){
+  dir.create(figure_dir_PANIN04)
+}
+
+PANIN04 <- readRDS(paste0(data_dir, "/", PANIN04_file))
+
+PANIN04 <- scale_sct(PANIN04)
+# list top 20 spatially variable genes
+suppressWarnings(
+      top20_space_var <- head(SpatiallyVariableFeatures(
+        PANIN04, selection.method = "markvariogram"), 20)
+    )
+print(top20_space_var)
+plot_spatial_gene_list(
+  PANIN04,
+  features = top20_space_var,
+  filename = paste0(figure_dir_PANIN04,"/spatial_variable_genes.pdf")
+  )
+plot_spatial_gene_list(PANIN04, features = pancreas_markers$alpha,
+                       filename = paste0(figure_dir_PANIN04, "/spatial_alpha_markers.pdf"))
+plot_spatial_gene_list(PANIN04, features = pancreas_markers$beta,
+                       filename = paste0(figure_dir_PANIN04, "/spatial_beta_markers.pdf"))
+plot_spatial_gene_list(PANIN04, features = pancreas_markers$delta,
+                       filename = paste0(figure_dir_PANIN04, "/spatial_delta_markers.pdf"))
+plot_spatial_gene_list(PANIN04, features = pancreas_markers$polypeptide,
+                       filename = paste0(figure_dir_PANIN04, "/spatial_polypeptide_markers.pdf"))
+plot_spatial_gene_list(PANIN04, features = pancreas_markers$acinar,
+                       filename = paste0(figure_dir_PANIN04, "/spatial_acinar_markers.pdf"))
+plot_spatial_gene_list(PANIN04, features = pancreas_markers$ductal,
+                       filename = paste0(figure_dir_PANIN04, "/spatial_ductal_markers.pdf"))
+plot_spatial_gene_list(PANIN04, features = pancreas_markers$mesenchymal,
+                       filename = paste0(figure_dir_PANIN04, "/spatial_mesenchymal_markers.pdf"))
+plot_spatial_gene_list(PANIN04, features = immune_markers$T_cell,
+                       filename = paste0(figure_dir_PANIN04, "/spatial_Tcell_markers.pdf"))
+plot_spatial_gene_list(PANIN04, features = immune_markers$B_cell,
+                       filename = paste0(figure_dir_PANIN04, "/spatial_Bcell_markers.pdf"))
+plot_spatial_gene_list(PANIN04, features = immune_markers$myeloid,
+                       filename = paste0(figure_dir_PANIN04, "/spatial_myeloid_markers.pdf"))
+plot_spatial_gene_list(PANIN04, features = immune_markers$fibroblast,
+                       filename = paste0(figure_dir_PANIN04, "/spatial_fibroblast_markers.pdf"))
+plot_spatial_gene_list(PANIN04, features = immune_markers$class_II_MHC,
+                       filename = paste0(figure_dir_PANIN04, "/spatial_classII_MHC_markers.pdf"))
+plot_spatial_gene_list(PANIN04, features = immune_markers$cell_cycle,
+                       filename = paste0(figure_dir_PANIN04, "/spatial_cycling_markers.pdf"))
+
+for(marker in immune_markers_all){
+  if(marker %in% rownames(PANIN04)){
+    plot <- SpatialFeaturePlot(PANIN04, features = marker, alpha = 1)
+    plot_save_pdf(plot = plot,
+                  filename = paste0(figure_dir_PANIN04, "/marker_", marker, ".pdf"))
+  } else {
+    print(paste0(marker, " not present in data"))
+  }
+}
+
+# PCA analysis
+PANIN04 <- RunPCA(PANIN04, assay = "SCT")
+elbow_plot <- ElbowPlot(PANIN04, ndims = 50)
+
+# assess Elbow plot
+elbow_plot
+
+# clustering and embedding based on 20 PCs 
+# 20 dims clustering
+PANIN04 <- FindNeighbors(PANIN04, reduction = "pca", dims = 1:20)
+suppressWarnings(
+  PANIN04 <- FindClusters(PANIN04, algorithm = 4, resolution = 0.8)
+)
+# suppressed warnings for legibility on knitted file
+# Warning message:
+## Warning in paste("reticulate", module, "load", sep = "::"): NAs introduced by
+## coercion to integer range
+
+PANIN04$Leiden_clusters <- PANIN04$seurat_clusters
+leiden_pal <- colorRamps::matlab.like2(length(levels(Idents(PANIN04))))
+
+PANIN04$Leiden_clusters <- PANIN04$seurat_clusters
+lei_plot <- SpatialDimPlot(PANIN04, pt.size.factor = 2) +
+  scale_fill_manual(values = leiden_pal) +
+  ggtitle(paste0(seg_name, ": Leiden Clusters"))
+print(lei_plot)
+plot_save_pdf(plot = lei_plot,
+              filename = paste0(figure_dir_PANIN04, "/spatial_leiden_idents.pdf"))
+plot_highlight_clusters(PANIN04,
+                        filename = paste0(figure_dir_PANIN04, "/spatial_leiden_clusters_res_0.8.pdf"))
+
+# Notes on cluster alignment with segment morphology
+# 1 : stroma, large blood vessel, adipose
+# 2 : stroma, large blood vessel, minimal adipose
+# 3 : stroma, large blood vessel, minimal adipose
+# 4 : PanIN duct, ADM, surrounding stroma, islet
+# 5 : stroma around acinar cells
+# 6 : acinar
+
+# clusters in the very low count regions barely follow morphology with multiple
+# morphological features captured in the same cluster. Of concern is that the
+# lumen of the large blood vessel is divided amongst multiple clusters.
+# There are ducts here that look much more like classical ADM than previous
+# segments, but the cluster they belong to does not distinguish them from the
+# neighboring PanIN duct, the stroma around them, or the islet right next to it
+# which usually clusters distinctly because of the substatial difference in 
+# transcriptome.
+# This segment should probably be subset to spots above a counts threshold, or
+# at least manually removing the poor-quality areas.
+
+# plot PCA with cluster labeling
+pca_plot <- DimPlot(PANIN04, group.by = "Leiden_clusters", reduction = "pca") +
+  ggtitle(paste0(seg_name, " PCA: Leiden Clusters"))
+print(pca_plot)
+plot_save_pdf(pca_plot,
+              filename = paste0(figure_dir_PANIN04, "/pca_leiden_clusters.pdf"))
+
+# compute UMAP
+PANIN04 <- RunUMAP(PANIN04, reduction = "pca", dims = 1:20)
+umap_plot <- DimPlot(PANIN04, group.by = "Leiden_clusters", reduction = "umap", label = TRUE) +
+  ggtitle(paste0(seg_name, " UMAP: Leiden Clusters"))
+print(umap_plot)
+plot_save_pdf(umap_plot,
+              filename = paste0(figure_dir_PANIN04, "/umap_leiden_clusters.pdf"))
+
+# save segment with low-dim embeddings
+saveRDS(PANIN04,
+        file = paste0(results_dir, "/", seg_name, "_preprocessed.rds"))
+
+# remove the seurat object to save memory for the other segments
+rm(PANIN04)
+```
+
+```{r Segment: PDAC04}
+seg_name <- "PDAC04"
+PDAC04_file <- rds_list[grep("^PDAC04", rds_list)]
+figure_dir_PDAC04 <- paste0(figure_dir, "/", seg_name)
+if(!dir.exists(figure_dir_PDAC04)){
+  dir.create(figure_dir_PDAC04)
+}
+
+PDAC04 <- readRDS(paste0(data_dir, "/", PDAC04_file))
+
+PDAC04 <- scale_sct(PDAC04)
+# list top 20 spatially variable genes
+suppressWarnings(
+      top20_space_var <- head(SpatiallyVariableFeatures(
+        PDAC04, selection.method = "markvariogram"), 20)
+    )
+print(top20_space_var)
+plot_spatial_gene_list(
+  PDAC04,
+  features = top20_space_var,
+  filename = paste0(figure_dir_PDAC04,"/spatial_variable_genes.pdf")
+  )
+plot_spatial_gene_list(PDAC04, features = pancreas_markers$alpha,
+                       filename = paste0(figure_dir_PDAC04, "/spatial_alpha_markers.pdf"))
+plot_spatial_gene_list(PDAC04, features = pancreas_markers$beta,
+                       filename = paste0(figure_dir_PDAC04, "/spatial_beta_markers.pdf"))
+plot_spatial_gene_list(PDAC04, features = pancreas_markers$delta,
+                       filename = paste0(figure_dir_PDAC04, "/spatial_delta_markers.pdf"))
+plot_spatial_gene_list(PDAC04, features = pancreas_markers$polypeptide,
+                       filename = paste0(figure_dir_PDAC04, "/spatial_polypeptide_markers.pdf"))
+plot_spatial_gene_list(PDAC04, features = pancreas_markers$acinar,
+                       filename = paste0(figure_dir_PDAC04, "/spatial_acinar_markers.pdf"))
+plot_spatial_gene_list(PDAC04, features = pancreas_markers$ductal,
+                       filename = paste0(figure_dir_PDAC04, "/spatial_ductal_markers.pdf"))
+plot_spatial_gene_list(PDAC04, features = pancreas_markers$mesenchymal,
+                       filename = paste0(figure_dir_PDAC04, "/spatial_mesenchymal_markers.pdf"))
+plot_spatial_gene_list(PDAC04, features = immune_markers$T_cell,
+                       filename = paste0(figure_dir_PDAC04, "/spatial_Tcell_markers.pdf"))
+plot_spatial_gene_list(PDAC04, features = immune_markers$B_cell,
+                       filename = paste0(figure_dir_PDAC04, "/spatial_Bcell_markers.pdf"))
+plot_spatial_gene_list(PDAC04, features = immune_markers$myeloid,
+                       filename = paste0(figure_dir_PDAC04, "/spatial_myeloid_markers.pdf"))
+plot_spatial_gene_list(PDAC04, features = immune_markers$fibroblast,
+                       filename = paste0(figure_dir_PDAC04, "/spatial_fibroblast_markers.pdf"))
+plot_spatial_gene_list(PDAC04, features = immune_markers$class_II_MHC,
+                       filename = paste0(figure_dir_PDAC04, "/spatial_classII_MHC_markers.pdf"))
+plot_spatial_gene_list(PDAC04, features = immune_markers$cell_cycle,
+                       filename = paste0(figure_dir_PDAC04, "/spatial_cycling_markers.pdf"))
+
+for(marker in immune_markers_all){
+  if(marker %in% rownames(PDAC04)){
+    plot <- SpatialFeaturePlot(PDAC04, features = marker, alpha = 1)
+    plot_save_pdf(plot = plot,
+                  filename = paste0(figure_dir_PDAC04, "/marker_", marker, ".pdf"))
+  } else {
+    print(paste0(marker, " not present in data"))
+  }
+}
+
+# PCA analysis
+PDAC04 <- RunPCA(PDAC04, assay = "SCT")
+elbow_plot <- ElbowPlot(PDAC04, ndims = 50)
+
+# assess Elbow plot
+elbow_plot
+
+# This is the worst elbowplot so far.
+
+# clustering and embedding based on 20 PCs 
+# 20 dims clustering
+PDAC04 <- FindNeighbors(PDAC04, reduction = "pca", dims = 1:20)
+suppressWarnings(
+  PDAC04 <- FindClusters(PDAC04, algorithm = 4, resolution = 0.8)
+)
+# suppressed warnings for legibility on knitted file
+# Warning message:
+## Warning in paste("reticulate", module, "load", sep = "::"): NAs introduced by
+## coercion to integer range
+
+PDAC04$Leiden_clusters <- PDAC04$seurat_clusters
+leiden_pal <- colorRamps::matlab.like2(length(levels(Idents(PDAC04))))
+
+PDAC04$Leiden_clusters <- PDAC04$seurat_clusters
+lei_plot <- SpatialDimPlot(PDAC04, pt.size.factor = 2) +
+  scale_fill_manual(values = leiden_pal) +
+  ggtitle(paste0(seg_name, ": Leiden Clusters"))
+print(lei_plot)
+plot_save_pdf(plot = lei_plot,
+              filename = paste0(figure_dir_PDAC04, "/spatial_leiden_idents.pdf"))
+plot_highlight_clusters(PDAC04,
+                        filename = paste0(figure_dir_PDAC04, "/spatial_leiden_clusters_res_0.8.pdf"))
+
+# Notes on cluster alignment with segment morphology
+# 1 : 
+# 2 : 
+# 3 : 
+
+# all of the clusters look picked at random, other than the fact that cluster
+# 1 has more of the stroma outside the tumor than the others. This segment
+# should probably be totally excluded, but we can try only using the small
+# tumor region and exluding all stroma. Still, the tumor has terrible counts
+# between 500 and 2000.
+
+# plot PCA with cluster labeling
+pca_plot <- DimPlot(PDAC04, group.by = "Leiden_clusters", reduction = "pca") +
+  ggtitle(paste0(seg_name, " PCA: Leiden Clusters"))
+print(pca_plot)
+plot_save_pdf(pca_plot,
+              filename = paste0(figure_dir_PDAC04, "/pca_leiden_clusters.pdf"))
+
+# compute UMAP
+PDAC04 <- RunUMAP(PDAC04, reduction = "pca", dims = 1:20)
+umap_plot <- DimPlot(PDAC04, group.by = "Leiden_clusters", reduction = "umap", label = TRUE) +
+  ggtitle(paste0(seg_name, " UMAP: Leiden Clusters"))
+print(umap_plot)
+plot_save_pdf(umap_plot,
+              filename = paste0(figure_dir_PDAC04, "/umap_leiden_clusters.pdf"))
+
+# save segment with low-dim embeddings
+saveRDS(PDAC04,
+        file = paste0(results_dir, "/", seg_name, "_preprocessed.rds"))
+
+# remove the seurat object to save memory for the other segments
+rm(PDAC04)
+```
+
+```{r Segment: CP05A}
+seg_name <- "CP05A"
+CP05A_file <- rds_list[grep("^CP05A", rds_list)]
+figure_dir_CP05A <- paste0(figure_dir, "/", seg_name)
+if(!dir.exists(figure_dir_CP05A)){
+  dir.create(figure_dir_CP05A)
+}
+
+CP05A <- readRDS(paste0(data_dir, "/", CP05A_file))
+
+CP05A <- scale_sct(CP05A)
+# list top 20 spatially variable genes
+suppressWarnings(
+      top20_space_var <- head(SpatiallyVariableFeatures(
+        CP05A, selection.method = "markvariogram"), 20)
+    )
+print(top20_space_var)
+plot_spatial_gene_list(
+  CP05A,
+  features = top20_space_var,
+  filename = paste0(figure_dir_CP05A,"/spatial_variable_genes.pdf")
+  )
+plot_spatial_gene_list(CP05A, features = pancreas_markers$alpha,
+                       filename = paste0(figure_dir_CP05A, "/spatial_alpha_markers.pdf"))
+plot_spatial_gene_list(CP05A, features = pancreas_markers$beta,
+                       filename = paste0(figure_dir_CP05A, "/spatial_beta_markers.pdf"))
+plot_spatial_gene_list(CP05A, features = pancreas_markers$delta,
+                       filename = paste0(figure_dir_CP05A, "/spatial_delta_markers.pdf"))
+plot_spatial_gene_list(CP05A, features = pancreas_markers$polypeptide,
+                       filename = paste0(figure_dir_CP05A, "/spatial_polypeptide_markers.pdf"))
+plot_spatial_gene_list(CP05A, features = pancreas_markers$acinar,
+                       filename = paste0(figure_dir_CP05A, "/spatial_acinar_markers.pdf"))
+plot_spatial_gene_list(CP05A, features = pancreas_markers$ductal,
+                       filename = paste0(figure_dir_CP05A, "/spatial_ductal_markers.pdf"))
+plot_spatial_gene_list(CP05A, features = pancreas_markers$mesenchymal,
+                       filename = paste0(figure_dir_CP05A, "/spatial_mesenchymal_markers.pdf"))
+plot_spatial_gene_list(CP05A, features = immune_markers$T_cell,
+                       filename = paste0(figure_dir_CP05A, "/spatial_Tcell_markers.pdf"))
+plot_spatial_gene_list(CP05A, features = immune_markers$B_cell,
+                       filename = paste0(figure_dir_CP05A, "/spatial_Bcell_markers.pdf"))
+plot_spatial_gene_list(CP05A, features = immune_markers$myeloid,
+                       filename = paste0(figure_dir_CP05A, "/spatial_myeloid_markers.pdf"))
+plot_spatial_gene_list(CP05A, features = immune_markers$fibroblast,
+                       filename = paste0(figure_dir_CP05A, "/spatial_fibroblast_markers.pdf"))
+plot_spatial_gene_list(CP05A, features = immune_markers$class_II_MHC,
+                       filename = paste0(figure_dir_CP05A, "/spatial_classII_MHC_markers.pdf"))
+plot_spatial_gene_list(CP05A, features = immune_markers$cell_cycle,
+                       filename = paste0(figure_dir_CP05A, "/spatial_cycling_markers.pdf"))
+
+for(marker in immune_markers_all){
+  if(marker %in% rownames(CP05A)){
+    plot <- SpatialFeaturePlot(CP05A, features = marker, alpha = 1)
+    plot_save_pdf(plot = plot,
+                  filename = paste0(figure_dir_CP05A, "/marker_", marker, ".pdf"))
+  } else {
+    print(paste0(marker, " not present in data"))
+  }
+}
+
+# PCA analysis
+CP05A <- RunPCA(CP05A, assay = "SCT")
+elbow_plot <- ElbowPlot(CP05A, ndims = 50)
+
+# assess Elbow plot
+elbow_plot
+
+# clustering and embedding based on 25 PCs 
+# 25 dims clustering
+CP05A <- FindNeighbors(CP05A, reduction = "pca", dims = 1:25)
+suppressWarnings(
+  CP05A <- FindClusters(CP05A, algorithm = 4, resolution = 0.8)
+)
+# suppressed warnings for legibility on knitted file
+# Warning message:
+## Warning in paste("reticulate", module, "load", sep = "::"): NAs introduced by
+## coercion to integer range
+
+CP05A$Leiden_clusters <- CP05A$seurat_clusters
+leiden_pal <- colorRamps::matlab.like2(length(levels(Idents(CP05A))))
+
+CP05A$Leiden_clusters <- CP05A$seurat_clusters
+lei_plot <- SpatialDimPlot(CP05A, pt.size.factor = 2) +
+  scale_fill_manual(values = leiden_pal) +
+  ggtitle(paste0(seg_name, ": Leiden Clusters"))
+print(lei_plot)
+plot_save_pdf(plot = lei_plot,
+              filename = paste0(figure_dir_CP05A, "/spatial_leiden_idents.pdf"))
+plot_highlight_clusters(CP05A,
+                        filename = paste0(figure_dir_CP05A, "/spatial_leiden_clusters_res_0.8.pdf"))
+
+# Notes on cluster alignment with segment morphology
+# 1 : ductal
+# 2 : stroma around ductal cells
+# 3 : stroma at the top around blood vessels
+# 4 : islet
+# 5 : stroma
+# 6 : inflamed stroma
+# 7 : stroma and adipose cells
+# 8 : dense stroma
+# 9 : stroma around multinucleated duct
+# 10 : ductal cells
+# 11 : dense stroma
+# 12 : several blood vessels and their surrounding stroma, one of the vessels looks very inflamed
+# 13 : inflamed acinar
+
+# Very good quality overall and an interesting representation of cell types collected
+
+# plot PCA with cluster labeling
+pca_plot <- DimPlot(CP05A, group.by = "Leiden_clusters", reduction = "pca") +
+  ggtitle(paste0(seg_name, " PCA: Leiden Clusters"))
+print(pca_plot)
+plot_save_pdf(pca_plot,
+              filename = paste0(figure_dir_CP05A, "/pca_leiden_clusters.pdf"))
+
+# compute UMAP
+CP05A <- RunUMAP(CP05A, reduction = "pca", dims = 1:25)
+umap_plot <- DimPlot(CP05A, group.by = "Leiden_clusters", reduction = "umap", label = TRUE) +
+  ggtitle(paste0(seg_name, " UMAP: Leiden Clusters"))
+print(umap_plot)
+plot_save_pdf(umap_plot,
+              filename = paste0(figure_dir_CP05A, "/umap_leiden_clusters.pdf"))
+
+# save segment with low-dim embeddings
+saveRDS(CP05A,
+        file = paste0(results_dir, "/", seg_name, "_preprocessed.rds"))
+
+# remove the seurat object to save memory for the other segments
+rm(CP05A)
+```
+
+```{r Segment: CP05B}
+seg_name <- "CP05B"
+CP05B_file <- rds_list[grep("^CP05B", rds_list)]
+figure_dir_CP05B <- paste0(figure_dir, "/", seg_name)
+if(!dir.exists(figure_dir_CP05B)){
+  dir.create(figure_dir_CP05B)
+}
+
+CP05B <- readRDS(paste0(data_dir, "/", CP05B_file))
+
+CP05B <- scale_sct(CP05B)
+# list top 20 spatially variable genes
+suppressWarnings(
+      top20_space_var <- head(SpatiallyVariableFeatures(
+        CP05B, selection.method = "markvariogram"), 20)
+    )
+print(top20_space_var)
+plot_spatial_gene_list(
+  CP05B,
+  features = top20_space_var,
+  filename = paste0(figure_dir_CP05B,"/spatial_variable_genes.pdf")
+  )
+plot_spatial_gene_list(CP05B, features = pancreas_markers$alpha,
+                       filename = paste0(figure_dir_CP05B, "/spatial_alpha_markers.pdf"))
+plot_spatial_gene_list(CP05B, features = pancreas_markers$beta,
+                       filename = paste0(figure_dir_CP05B, "/spatial_beta_markers.pdf"))
+plot_spatial_gene_list(CP05B, features = pancreas_markers$delta,
+                       filename = paste0(figure_dir_CP05B, "/spatial_delta_markers.pdf"))
+plot_spatial_gene_list(CP05B, features = pancreas_markers$polypeptide,
+                       filename = paste0(figure_dir_CP05B, "/spatial_polypeptide_markers.pdf"))
+plot_spatial_gene_list(CP05B, features = pancreas_markers$acinar,
+                       filename = paste0(figure_dir_CP05B, "/spatial_acinar_markers.pdf"))
+plot_spatial_gene_list(CP05B, features = pancreas_markers$ductal,
+                       filename = paste0(figure_dir_CP05B, "/spatial_ductal_markers.pdf"))
+plot_spatial_gene_list(CP05B, features = pancreas_markers$mesenchymal,
+                       filename = paste0(figure_dir_CP05B, "/spatial_mesenchymal_markers.pdf"))
+plot_spatial_gene_list(CP05B, features = immune_markers$T_cell,
+                       filename = paste0(figure_dir_CP05B, "/spatial_Tcell_markers.pdf"))
+plot_spatial_gene_list(CP05B, features = immune_markers$B_cell,
+                       filename = paste0(figure_dir_CP05B, "/spatial_Bcell_markers.pdf"))
+plot_spatial_gene_list(CP05B, features = immune_markers$myeloid,
+                       filename = paste0(figure_dir_CP05B, "/spatial_myeloid_markers.pdf"))
+plot_spatial_gene_list(CP05B, features = immune_markers$fibroblast,
+                       filename = paste0(figure_dir_CP05B, "/spatial_fibroblast_markers.pdf"))
+plot_spatial_gene_list(CP05B, features = immune_markers$class_II_MHC,
+                       filename = paste0(figure_dir_CP05B, "/spatial_classII_MHC_markers.pdf"))
+plot_spatial_gene_list(CP05B, features = immune_markers$cell_cycle,
+                       filename = paste0(figure_dir_CP05B, "/spatial_cycling_markers.pdf"))
+
+for(marker in immune_markers_all){
+  if(marker %in% rownames(CP05B)){
+    plot <- SpatialFeaturePlot(CP05B, features = marker, alpha = 1)
+    plot_save_pdf(plot = plot,
+                  filename = paste0(figure_dir_CP05B, "/marker_", marker, ".pdf"))
+  } else {
+    print(paste0(marker, " not present in data"))
+  }
+}
+
+# PCA analysis
+CP05B <- RunPCA(CP05B, assay = "SCT")
+elbow_plot <- ElbowPlot(CP05B, ndims = 50)
+
+# assess Elbow plot
+elbow_plot
+
+# clustering and embedding based on 25 PCs 
+# 25 dims clustering
+CP05B <- FindNeighbors(CP05B, reduction = "pca", dims = 1:25)
+suppressWarnings(
+  CP05B <- FindClusters(CP05B, algorithm = 4, resolution = 0.8)
+)
+# suppressed warnings for legibility on knitted file
+# Warning message:
+## Warning in paste("reticulate", module, "load", sep = "::"): NAs introduced by
+## coercion to integer range
+
+CP05B$Leiden_clusters <- CP05B$seurat_clusters
+leiden_pal <- colorRamps::matlab.like2(length(levels(Idents(CP05B))))
+
+CP05B$Leiden_clusters <- CP05B$seurat_clusters
+lei_plot <- SpatialDimPlot(CP05B, pt.size.factor = 2) +
+  scale_fill_manual(values = leiden_pal) +
+  ggtitle(paste0(seg_name, ": Leiden Clusters"))
+print(lei_plot)
+plot_save_pdf(plot = lei_plot,
+              filename = paste0(figure_dir_CP05B, "/spatial_leiden_idents.pdf"))
+plot_highlight_clusters(CP05B,
+                        filename = paste0(figure_dir_CP05B, "/spatial_leiden_clusters_res_0.8.pdf"))
+
+# Notes on cluster alignment with segment morphology
+# 1 : stroma between acinar lobes
+# 2 : acinar bordering stroma
+# 3 : stroma, borders some adipose
+# 4 : acinar, relatively inflamed
+# 5 : stroma
+# 6 : stroma on left segment edge
+# 7 : acinar bordering stroma
+# 8 : stroma around acinar ducts
+# 9 : stroma between small ducts
+# 10 : large blood vessels
+# 11 : islet
+# 12 : large duct with columnar metaplasia
+# 13 : collagen around some vessels
+
+# plot PCA with cluster labeling
+pca_plot <- DimPlot(CP05B, group.by = "Leiden_clusters", reduction = "pca") +
+  ggtitle(paste0(seg_name, " PCA: Leiden Clusters"))
+print(pca_plot)
+plot_save_pdf(pca_plot,
+              filename = paste0(figure_dir_CP05B, "/pca_leiden_clusters.pdf"))
+
+# compute UMAP
+CP05B <- RunUMAP(CP05B, reduction = "pca", dims = 1:25)
+umap_plot <- DimPlot(CP05B, group.by = "Leiden_clusters", reduction = "umap", label = TRUE) +
+  ggtitle(paste0(seg_name, " UMAP: Leiden Clusters"))
+print(umap_plot)
+plot_save_pdf(umap_plot,
+              filename = paste0(figure_dir_CP05B, "/umap_leiden_clusters.pdf"))
+
+# save segment with low-dim embeddings
+saveRDS(CP05B,
+        file = paste0(results_dir, "/", seg_name, "_preprocessed.rds"))
+
+# remove the seurat object to save memory for the other segments
+rm(CP05B)
+```
+
+```{r Segment: NRL05}
+seg_name <- "NRL05"
+NRL05_file <- rds_list[grep("^NRL05", rds_list)]
+figure_dir_NRL05 <- paste0(figure_dir, "/", seg_name)
+if(!dir.exists(figure_dir_NRL05)){
+  dir.create(figure_dir_NRL05)
+}
+
+NRL05 <- readRDS(paste0(data_dir, "/", NRL05_file))
+
+NRL05 <- scale_sct(NRL05)
+# list top 20 spatially variable genes
+suppressWarnings(
+      top20_space_var <- head(SpatiallyVariableFeatures(
+        NRL05, selection.method = "markvariogram"), 20)
+    )
+print(top20_space_var)
+plot_spatial_gene_list(
+  NRL05,
+  features = top20_space_var,
+  filename = paste0(figure_dir_NRL05,"/spatial_variable_genes.pdf")
+  )
+plot_spatial_gene_list(NRL05, features = pancreas_markers$alpha,
+                       filename = paste0(figure_dir_NRL05, "/spatial_alpha_markers.pdf"))
+plot_spatial_gene_list(NRL05, features = pancreas_markers$beta,
+                       filename = paste0(figure_dir_NRL05, "/spatial_beta_markers.pdf"))
+plot_spatial_gene_list(NRL05, features = pancreas_markers$delta,
+                       filename = paste0(figure_dir_NRL05, "/spatial_delta_markers.pdf"))
+plot_spatial_gene_list(NRL05, features = pancreas_markers$polypeptide,
+                       filename = paste0(figure_dir_NRL05, "/spatial_polypeptide_markers.pdf"))
+plot_spatial_gene_list(NRL05, features = pancreas_markers$acinar,
+                       filename = paste0(figure_dir_NRL05, "/spatial_acinar_markers.pdf"))
+plot_spatial_gene_list(NRL05, features = pancreas_markers$ductal,
+                       filename = paste0(figure_dir_NRL05, "/spatial_ductal_markers.pdf"))
+plot_spatial_gene_list(NRL05, features = pancreas_markers$mesenchymal,
+                       filename = paste0(figure_dir_NRL05, "/spatial_mesenchymal_markers.pdf"))
+plot_spatial_gene_list(NRL05, features = immune_markers$T_cell,
+                       filename = paste0(figure_dir_NRL05, "/spatial_Tcell_markers.pdf"))
+plot_spatial_gene_list(NRL05, features = immune_markers$B_cell,
+                       filename = paste0(figure_dir_NRL05, "/spatial_Bcell_markers.pdf"))
+plot_spatial_gene_list(NRL05, features = immune_markers$myeloid,
+                       filename = paste0(figure_dir_NRL05, "/spatial_myeloid_markers.pdf"))
+plot_spatial_gene_list(NRL05, features = immune_markers$fibroblast,
+                       filename = paste0(figure_dir_NRL05, "/spatial_fibroblast_markers.pdf"))
+plot_spatial_gene_list(NRL05, features = immune_markers$class_II_MHC,
+                       filename = paste0(figure_dir_NRL05, "/spatial_classII_MHC_markers.pdf"))
+plot_spatial_gene_list(NRL05, features = immune_markers$cell_cycle,
+                       filename = paste0(figure_dir_NRL05, "/spatial_cycling_markers.pdf"))
+
+for(marker in immune_markers_all){
+  if(marker %in% rownames(NRL05)){
+    plot <- SpatialFeaturePlot(NRL05, features = marker, alpha = 1)
+    plot_save_pdf(plot = plot,
+                  filename = paste0(figure_dir_NRL05, "/marker_", marker, ".pdf"))
+  } else {
+    print(paste0(marker, " not present in data"))
+  }
+}
+
+# PCA analysis
+NRL05 <- RunPCA(NRL05, assay = "SCT")
+elbow_plot <- ElbowPlot(NRL05, ndims = 50)
+
+# assess Elbow plot
+elbow_plot
+
+# clustering and embedding based on 25 PCs 
+# 25 dims clustering
+NRL05 <- FindNeighbors(NRL05, reduction = "pca", dims = 1:25)
+suppressWarnings(
+  NRL05 <- FindClusters(NRL05, algorithm = 4, resolution = 0.8)
+)
+# suppressed warnings for legibility on knitted file
+# Warning message:
+## Warning in paste("reticulate", module, "load", sep = "::"): NAs introduced by
+## coercion to integer range
+
+NRL05$Leiden_clusters <- NRL05$seurat_clusters
+leiden_pal <- colorRamps::matlab.like2(length(levels(Idents(NRL05))))
+
+NRL05$Leiden_clusters <- NRL05$seurat_clusters
+lei_plot <- SpatialDimPlot(NRL05, pt.size.factor = 2) +
+  scale_fill_manual(values = leiden_pal) +
+  ggtitle(paste0(seg_name, ": Leiden Clusters"))
+print(lei_plot)
+plot_save_pdf(plot = lei_plot,
+              filename = paste0(figure_dir_NRL05, "/spatial_leiden_idents.pdf"))
+plot_highlight_clusters(NRL05,
+                        filename = paste0(figure_dir_NRL05, "/spatial_leiden_clusters_res_0.8.pdf"))
+
+# Notes on cluster alignment with segment morphology
+# 1 : Stroma between acinar cells within lobe, captures some acinar cells and collagen around part of a large duct
+# 2 : acinar
+# 3 : inflamed stroma, may include a TLS, follows MS4A1 high spots
+# 4 : stroma
+# 5 : stroma around medium ducts
+# 6 : acinar
+# 7 : acinar bordering stroma
+# 8 : dense stroma
+# 9 : stroma around small ducts
+# 10 : stroma, most neighbors small adipose spots
+# 11 : large ducts with collagen, ductal cells are healthy cuboidal
+# 12 : acinar, group neighboring large ducts
+# 13 : islets, some bleed over into neighboring acinar
+
+# slight amount of bleeding into other types like regions of ductal collagen falling
+# in acinar clusters and islet clusters including some surrounding acinar. 
+
+# plot PCA with cluster labeling
+pca_plot <- DimPlot(NRL05, group.by = "Leiden_clusters", reduction = "pca") +
+  ggtitle(paste0(seg_name, " PCA: Leiden Clusters"))
+print(pca_plot)
+plot_save_pdf(pca_plot,
+              filename = paste0(figure_dir_NRL05, "/pca_leiden_clusters.pdf"))
+
+# compute UMAP
+NRL05 <- RunUMAP(NRL05, reduction = "pca", dims = 1:25)
+umap_plot <- DimPlot(NRL05, group.by = "Leiden_clusters", reduction = "umap", label = TRUE) +
+  ggtitle(paste0(seg_name, " UMAP: Leiden Clusters"))
+print(umap_plot)
+plot_save_pdf(umap_plot,
+              filename = paste0(figure_dir_NRL05, "/umap_leiden_clusters.pdf"))
+
+# save segment with low-dim embeddings
+saveRDS(NRL05,
+        file = paste0(results_dir, "/", seg_name, "_preprocessed.rds"))
+
+# remove the seurat object to save memory for the other segments
+rm(NRL05)
+```
+
+```{r Segment: PDAC05}
+seg_name <- "PDAC05"
+PDAC05_file <- rds_list[grep("^PDAC05", rds_list)]
+figure_dir_PDAC05 <- paste0(figure_dir, "/", seg_name)
+if(!dir.exists(figure_dir_PDAC05)){
+  dir.create(figure_dir_PDAC05)
+}
+
+PDAC05 <- readRDS(paste0(data_dir, "/", PDAC05_file))
+
+PDAC05 <- scale_sct(PDAC05)
+# list top 20 spatially variable genes
+suppressWarnings(
+      top20_space_var <- head(SpatiallyVariableFeatures(
+        PDAC05, selection.method = "markvariogram"), 20)
+    )
+print(top20_space_var)
+plot_spatial_gene_list(
+  PDAC05,
+  features = top20_space_var,
+  filename = paste0(figure_dir_PDAC05,"/spatial_variable_genes.pdf")
+  )
+plot_spatial_gene_list(PDAC05, features = pancreas_markers$alpha,
+                       filename = paste0(figure_dir_PDAC05, "/spatial_alpha_markers.pdf"))
+plot_spatial_gene_list(PDAC05, features = pancreas_markers$beta,
+                       filename = paste0(figure_dir_PDAC05, "/spatial_beta_markers.pdf"))
+plot_spatial_gene_list(PDAC05, features = pancreas_markers$delta,
+                       filename = paste0(figure_dir_PDAC05, "/spatial_delta_markers.pdf"))
+plot_spatial_gene_list(PDAC05, features = pancreas_markers$polypeptide,
+                       filename = paste0(figure_dir_PDAC05, "/spatial_polypeptide_markers.pdf"))
+plot_spatial_gene_list(PDAC05, features = pancreas_markers$acinar,
+                       filename = paste0(figure_dir_PDAC05, "/spatial_acinar_markers.pdf"))
+plot_spatial_gene_list(PDAC05, features = pancreas_markers$ductal,
+                       filename = paste0(figure_dir_PDAC05, "/spatial_ductal_markers.pdf"))
+plot_spatial_gene_list(PDAC05, features = pancreas_markers$mesenchymal,
+                       filename = paste0(figure_dir_PDAC05, "/spatial_mesenchymal_markers.pdf"))
+plot_spatial_gene_list(PDAC05, features = immune_markers$T_cell,
+                       filename = paste0(figure_dir_PDAC05, "/spatial_Tcell_markers.pdf"))
+plot_spatial_gene_list(PDAC05, features = immune_markers$B_cell,
+                       filename = paste0(figure_dir_PDAC05, "/spatial_Bcell_markers.pdf"))
+plot_spatial_gene_list(PDAC05, features = immune_markers$myeloid,
+                       filename = paste0(figure_dir_PDAC05, "/spatial_myeloid_markers.pdf"))
+plot_spatial_gene_list(PDAC05, features = immune_markers$fibroblast,
+                       filename = paste0(figure_dir_PDAC05, "/spatial_fibroblast_markers.pdf"))
+plot_spatial_gene_list(PDAC05, features = immune_markers$class_II_MHC,
+                       filename = paste0(figure_dir_PDAC05, "/spatial_classII_MHC_markers.pdf"))
+plot_spatial_gene_list(PDAC05, features = immune_markers$cell_cycle,
+                       filename = paste0(figure_dir_PDAC05, "/spatial_cycling_markers.pdf"))
+
+for(marker in immune_markers_all){
+  if(marker %in% rownames(PDAC05)){
+    plot <- SpatialFeaturePlot(PDAC05, features = marker, alpha = 1)
+    plot_save_pdf(plot = plot,
+                  filename = paste0(figure_dir_PDAC05, "/marker_", marker, ".pdf"))
+  } else {
+    print(paste0(marker, " not present in data"))
+  }
+}
+
+# PCA analysis
+PDAC05 <- RunPCA(PDAC05, assay = "SCT")
+elbow_plot <- ElbowPlot(PDAC05, ndims = 50)
+
+# assess Elbow plot
+elbow_plot
+
+# clustering and embedding based on 25 PCs 
+# 25 dims clustering
+PDAC05 <- FindNeighbors(PDAC05, reduction = "pca", dims = 1:25)
+suppressWarnings(
+  PDAC05 <- FindClusters(PDAC05, algorithm = 4, resolution = 0.8)
+)
+# suppressed warnings for legibility on knitted file
+# Warning message:
+## Warning in paste("reticulate", module, "load", sep = "::"): NAs introduced by
+## coercion to integer range
+
+PDAC05$Leiden_clusters <- PDAC05$seurat_clusters
+leiden_pal <- colorRamps::matlab.like2(length(levels(Idents(PDAC05))))
+
+PDAC05$Leiden_clusters <- PDAC05$seurat_clusters
+lei_plot <- SpatialDimPlot(PDAC05, pt.size.factor = 2) +
+  scale_fill_manual(values = leiden_pal) +
+  ggtitle(paste0(seg_name, ": Leiden Clusters"))
+print(lei_plot)
+plot_save_pdf(plot = lei_plot,
+              filename = paste0(figure_dir_PDAC05, "/spatial_leiden_idents.pdf"))
+plot_highlight_clusters(PDAC05,
+                        filename = paste0(figure_dir_PDAC05, "/spatial_leiden_clusters_res_0.8.pdf"))
+
+# Notes on cluster alignment with segment morphology
+# 1 : dense stroma around small and medium neoplastic ducts
+# 2 : cancerous ducts, covers most ducts on the right side
+# 3 : islet, stroma, small cancerous ducts. Follows INS expression but covers other morphology types
+# 4 : stroma neighboring cancerous ducts
+# 5 : dense stroma
+# 6 : dense stroma, includes a TLS that is partially cut off by punch biopsy
+# 7 : cancerous ducts
+# 8 : dense stroma, fewer nuclei
+# 9 : stroma neighboring cancerous ducts, right side of segment
+# 10 : dense stroma, neighbors adipose
+# 11 : adipose
+# 12 : blood vessels
+# 13 : stroma
+# 14 : stroma
+# 15 : collagen from very small blood vessels? spots are very isolated, but follow visible morphology.
+
+# plot PCA with cluster labeling
+pca_plot <- DimPlot(PDAC05, group.by = "Leiden_clusters", reduction = "pca") +
+  ggtitle(paste0(seg_name, " PCA: Leiden Clusters"))
+print(pca_plot)
+plot_save_pdf(pca_plot,
+              filename = paste0(figure_dir_PDAC05, "/pca_leiden_clusters.pdf"))
+
+# compute UMAP
+PDAC05 <- RunUMAP(PDAC05, reduction = "pca", dims = 1:25)
+umap_plot <- DimPlot(PDAC05, group.by = "Leiden_clusters", reduction = "umap", label = TRUE) +
+  ggtitle(paste0(seg_name, " UMAP: Leiden Clusters"))
+print(umap_plot)
+plot_save_pdf(umap_plot,
+              filename = paste0(figure_dir_PDAC05, "/umap_leiden_clusters.pdf"))
+
+# save segment with low-dim embeddings
+saveRDS(PDAC05,
+        file = paste0(results_dir, "/", seg_name, "_preprocessed.rds"))
+
+# remove the seurat object to save memory for the other segments
+rm(PDAC05)
+```

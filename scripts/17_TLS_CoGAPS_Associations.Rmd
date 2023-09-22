@@ -1,0 +1,1197 @@
+---
+title: "17_TLS_CoGAPS_Associations"
+author: "Jacob Mitchell"
+date: "2023-05-04"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r Load Packages}
+library(Seurat)
+library(CoGAPS)
+library(SpaceMarkers)
+library(dplyr)
+library(tidyr)
+library(msigdbr)
+library(fgsea)
+library(forcats)
+library(ggplot2)
+library(ggpubr)
+library(ggrepel)
+library(scales)
+library(circlize)
+library(dittoSeq)
+library(ComplexHeatmap)
+library(EnhancedVolcano)
+library(patchwork)
+
+set.seed(123)
+sessionInfo()
+```
+
+```{r Custom Functions}
+# save spatial plots with high aspect ratio for disabled cropping
+save_spatial_plot_pdf <- function(plot, file){
+  ggsave(plot = plot,
+         file = file,
+         width = unit(8, "in"), height = unit(6, "in"))
+}
+
+# add pattern weights to cell meta data
+add_cogaps_weights <- 
+  function(seurat, cogaps){
+    seurat@meta.data <- cbind(seurat@meta.data, cogaps@sampleFactors)
+    return(seurat)
+  }
+
+# plot patterns overlayed on segment images
+plot_spatial_cogaps_weights <-
+  function(seurat, image, patterns = NULL, show = TRUE, save = NULL){
+    if(is.null(patterns)){
+      patterns <- colnames(seurat@meta.data)[
+        grepl("^Pattern_", colnames(seurat@meta.data))
+        ]
+    }
+    for(pat in patterns){
+      plot <- SpatialFeaturePlot(
+        seurat, images = image, features = pat,
+        pt.size.factor = 2) +
+        scale_fill_viridis_c() +
+        ggtitle(image)
+      if(show){
+        print(plot)
+      }
+      if(!is.null(save)){
+        ggsave(plot = plot,
+               filename = save,
+               width = unit(6, "in"), height = unit(6, "in"))
+      }
+    }
+  }
+
+# plot boxplot of pattern weights by segment
+
+plot_pattern_boxplot <-
+  function(seurat, group_by, patterns = NULL, show = TRUE, save = NULL){
+    if(is.null(patterns)){
+      patterns <- colnames(seurat@meta.data)[
+        grepl("^Pattern_", colnames(seurat@meta.data))
+        ]
+    }
+    for(pat in patterns){
+      plot <- ggplot(data = seurat@meta.data,
+                     aes(x = .data[[group_by]], y = .data[[pat]],
+                         fill = .data[[group_by]])) +
+        geom_boxplot(outlier.alpha = 0) +
+        geom_jitter(width = 0.2, size = 0.5) +
+        theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1))
+      if(show){
+        print(plot)
+      }
+      if(!is.null(save)){
+        ggsave(plot = plot,
+               filename = save,
+               width = unit(6, "in"), height = unit(6, "in"))
+      }
+    }
+  }
+
+# check for genes of interest among pattern markers
+find_cogaps_markers <- 
+  function(gene_list, patternMarkers_result){
+    pattern_check <- list()
+    a <- 1
+    for(pm in patternMarkers_result$PatternMarkers){
+      pattern_name <- paste0("Pattern_", a)
+      present_genes <- c()
+      
+      for(g in gene_list){
+        if(g %in% pm){
+          present_genes <- c(present_genes, g)
+        }
+      }
+      pattern_check[[pattern_name]] <- present_genes
+      a <- a + 1
+    }
+    rm(a)
+    
+    return(pattern_check)
+  }
+
+# plot results of over representation analysis
+plot_ora_geneset <- 
+  function(fora_result, title, signinf_only = TRUE, show = TRUE, save = NULL){
+    # process data for plotting waterfall
+    plot_data <- fora_result
+    if(signinf_only){
+      # subset to significant results
+      plot_data <- plot_data[plot_data$padj <= 0.05,]
+    }
+    # only render plot if patterns have passed significance threshold
+    if(nrow(plot_data)){
+      plot_data[["-log10_padj"]] <- -log10(plot_data$padj)
+      plot_data <- arrange(.data = plot_data, - .data[["-log10_padj"]])
+      plot_data <- mutate(.data = plot_data, 
+                          pathway = fct_reorder(pathway, .data[["-log10_padj"]]))
+      
+      # plot ORA waterfall plot
+      
+      plot <- ggplot(plot_data,
+                     aes(x = .data[["pathway"]], y = .data[["-log10_padj"]],
+                         fill = .data[["pathway"]])) +
+        geom_col() +
+        coord_flip() +
+        geom_hline(yintercept = -log10(0.05)) + # significant p-value threshold
+        theme(legend.position = "none") +
+        ggtitle(title)
+      if(show){
+        print(plot)
+      }
+      if(!is.null(save)){
+        ggsave(plot = plot,
+               filename = save,
+               width = unit(6, "in"), height = unit(8, "in"))
+      }
+    }
+  }
+
+DE_save_results <- function(seurat, group.by, ident.1, ident.2, latent.vars,
+                            features = rownames(seurat),
+                            save_path){
+  
+  de <- FindMarkers(
+    object = seurat,
+    features = features,
+    group.by = group.by, ident.1 = ident.1, ident.2 = ident.2,
+    latent.vars = latent.vars,
+    test.use = "MAST",
+    logfc.threshold = 0)
+  # save complete results
+  write.csv(de,
+            file = paste0(save_path, "/MAST_DE_",
+                          group.by, "_", ident.1, "-", ident.2, ".csv"))
+  # save significant markers for ident.1
+  de_1 <- de[de$avg_log2FC > 0 & de$p_val_adj < 0.05,] %>% arrange(- avg_log2FC)
+  if(nrow(de_1)){
+    write.csv(de_1,
+              file = paste0(save_path, "/MAST_DE_",
+                            group.by, "_", ident.1, "_over_", ident.2, "_markers.csv"))
+  } else {warning(paste0("No differentially expressed markers found for:", ident.1))}
+  # save significant markers for ident.1
+  de_2 <- de[de$avg_log2FC < 0 & de$p_val_adj < 0.05,] %>% arrange(avg_log2FC)
+  
+  if(nrow(de_2)){
+    write.csv(de_2,
+              file = paste0(save_path, "/MAST_DE_",
+                            group.by, "_", ident.2, "_over_", ident.1, "_markers.csv"))
+  } else {warning(paste0("No differentially expressed markers found for:", ident.2))}
+  return(de)
+}
+
+DE_plot_results <- function(de, seurat, group.by, ident.1, ident.2,
+                            images = Images(seurat),
+                            figure_path,
+                            max_markers = 10){
+  # de is the data frame of results from FindMarkers()
+  
+  de_1 <- de[de$avg_log2FC > 0 & de$p_val_adj < 0.05,] %>% arrange(- avg_log2FC)
+  if(nrow(de_1)){
+    # only plot DE genes with |LFC| > 0.5
+    gene_n <- ifelse(nrow(de_1) <= max_markers, nrow(de_1), max_markers)
+    for(g in rownames(de_1[1:gene_n,])){
+      print(g)
+      p <- SpatialFeaturePlot(seurat, features = g, crop = FALSE, 
+                              images = images, ncol = 4)
+      ggsave(plot = p,
+             file = paste0(figure_path, "/spatial_TLS_", g, ".pdf"),
+             width = unit(16, "in"), height = unit(18, "in"))
+    } 
+  } else {warning(paste0("No differentially expressed markers found for:", ident.1))}
+  
+  de_2 <- de[de$avg_log2FC < 0 & de$p_val_adj < 0.05,] %>% arrange(avg_log2FC)
+  if(nrow(de_2)){
+    # only plot DE genes with |LFC| > 0.5
+    gene_n <- ifelse(nrow(de_2) <= max_markers, nrow(de_2), max_markers)
+    for(g in rownames(de_2[1:gene_n,])){
+      print(g)
+      p <- SpatialFeaturePlot(seurat, features = g, crop = FALSE, 
+                              images = images, ncol = 4)
+      ggsave(plot = p,
+             file = paste0(figure_path, "/spatial_TLS_", g, ".pdf"),
+             width = unit(16, "in"), height = unit(18, "in"))
+    }
+  } else {warning(paste0("No differentially expressed markers found for:", ident.2))}
+}
+
+plot_heatmap <- function(seurat, geneset, 
+                         cluster_cells = TRUE,
+                         cell_order = NULL,
+                         cellAnnotation = NULL,
+                         ...){
+  # limit to unique entries, some are repeated in GOMF list
+  geneset <- unique(geneset)
+  
+  # check if plotted genes are in seurat data
+  if(sum(!geneset %in% rownames(seurat))){
+    mis_genes <- geneset[!geneset %in% rownames(seurat)]
+    warning(paste0("genes not present in seurat data: ", 
+                   paste(mis_genes, sep = "", collapse = ", ")))
+    geneset <- geneset[!geneset %in% mis_genes]
+  }
+  
+  # cell_meta <- seurat@meta.data
+  mat <- as.matrix(seurat@assays$SCT@data[geneset, colnames(seurat)])
+  # note and remove genes with 0 variance
+  row_sd <- apply(mat, 1, sd)
+  no_var <- rownames(mat)[row_sd == 0]
+  if(length(no_var)){
+    warning(paste0("genes with no variance removed: ", 
+                   paste(no_var, sep = "", collapse = ", ")))
+    mat <- mat[!rownames(mat) %in% no_var,]
+  }
+  
+  # scale the matrix
+  # transposes are necessary because scale() scales across columns
+  scaled_mat <- t(scale(t(mat)))
+  
+  if(!is.null(cell_order) & cluster_cells == FALSE){
+    scaled_mat <- scaled_mat[,cell_order]
+  }
+  
+  hmap <- Heatmap(
+    matrix = scaled_mat,
+    # col = col_fun,
+    cluster_columns = cluster_cells,
+    show_column_dend = FALSE,
+    show_column_names = FALSE,
+    name = "expression",
+    top_annotation = cellAnnotation,
+    ...
+  )
+  plot(hmap)
+}
+
+# heatmap of pattern marker scores, star in boxes where gene is a marker
+pattern_marker_query_heatmap <-
+  function(cogapsResult, patternMarkersResult, query_genes){
+    # limit query to genes in patternMarkersResult
+    missing_genes <- query_genes[
+      !query_genes %in% rownames(patternMarkersResult$PatternMarkerScores)]
+    query_genes <- query_genes[!query_genes %in% missing_genes]
+    query_genes <- unique(query_genes)
+    
+    # amplitude matrix as heatmap values
+    A_mat <- cogapsResult@featureLoadings[query_genes,,drop=FALSE]
+    
+    pattern_names <- factor(names(patternMarkersResult$PatternMarkers),
+                            levels = paste0("Pattern_",
+                                            1:length(names(patternMarkersResult$PatternMarkers))))
+    marker_mat <- NULL
+    for(p in pattern_names){
+      marker <- sapply(query_genes, 
+                       FUN = function(x){
+                         if(x %in% patternMarkersResult$PatternMarkers[[p]]){
+                           return("x")
+                           } else {return("")}
+                         })
+      marker_mat <- cbind(marker_mat, marker)
+    }
+    colnames(marker_mat) <- pattern_names
+    
+    pat_pal <- hue_pal()(length(colnames(A_mat)))
+    names(pat_pal) <- colnames(A_mat)
+    
+    pat_anno <- columnAnnotation(
+      pattern = pattern_names,
+      col = list(pattern = pat_pal)
+    )
+    
+    # col_fun = colorRamp2(c(0, max(A_mat)), c("white", "red"))
+    col_fun = viridis_pal(option = "viridis")(max(A_mat))
+    color_threshold <- max(A_mat)/2
+    
+    hmap <- Heatmap(A_mat,
+            cluster_columns = FALSE,
+            top_annotation = pat_anno,
+            name = "Gene\nAmplitude",
+            col = col_fun,
+            cell_fun = function(j, i, x, y, w, h, col) { # add text to each grid
+              grid.text(marker_mat[i, j], x, y, 
+                        gp = gpar(col = ifelse(A_mat[i,j] > color_threshold, "black", "white"), fontface = "bold"))
+              })
+    draw(hmap)
+  }
+```
+
+```{r Create Directories}
+result_dir <- "processed_data/17_TLS_CoGAPS_Associations"
+if(!dir.exists(result_dir)){
+  dir.create(result_dir)
+}
+
+figure_dir <- "figures/17_TLS_CoGAPS_Associations"
+if(!dir.exists(figure_dir)){
+  dir.create(figure_dir)
+}
+```
+
+```{r Module Score Genes}
+immune_markers <-
+  list(
+    "T_cell" = c("PTPRC", "CD3D", "CD3E", "CD3G", "LCK", "CD8A", "CD4", "B3GAT1", 
+                 "CD69", "FOXP3", "LAG3", "TNFRSF9", "CXCR5", "IL2RA", "PDCD1", 
+                 "GZMB", "TOX2", "CCR7"),
+    "B_cell" = c("PTPRC", "CD19", "MS4A1", "CR2", "IGHM", "AICDA"),
+    "myeloid" = c("PTPRC","CD14", "CD68", "FCGR3A", "FCGR3B", "ADGRE1", "ARG1", 
+                  "CD209", "CD274", "ITGAM", "FCER2"),
+    "fibroblast" = c("ACTA2", "KRT20", "PDPN", "VIM"),
+    "class_II_MHC" = c("HLA-DRA", "HLA-DQA1", "HLA-DQA2", "HLA-DQB2", "HLA-DPA1", "HLA-DPB1")
+  )
+
+# PDAC Typing Module Scores
+# source: https://www.biorxiv.org/content/10.1101/2022.07.16.500312v1.full
+cancer_modules <- 
+  list(
+    "Classical" = c("BTNL8", "FAM3D", "ATAD4", "AGR3", "CTSE", "LOC400573", "LYZ",
+                    "TFF2", "TFF1", "ANXA10", "LGALS4", "PLA2G10", "CEACAM6",
+                    "VSIG2", "TSPAN8", "ST6GALNAC1", "AGR2", "TFF3", "CYP3A7",
+                    "MYO1A", "CLRN3", "KRT20", "CDH17", "SPINK4", "REG4"),
+    "Basal_like" = c("VGLL", "UCA1", "S100A2", "LY6D", "SPRR3", "SPRR1B", "LEMD1",
+                     "KRT15", "CTSL2", "DHRS9", "AREG", "CST6", "SERPINB3", "KRT6C",
+                     "KRTGA", "SERPINB4", "FAM83A", "SCEL", "FGFBP1", "KRT7",
+                     "KRT17", "GPR87", "TNS4", "SLC2A1", "ANXA8L2"),
+    "CSC" = c("ABCG2", "ALDH1A1", "CD24", "CD44", "EPCAM", "PROM1","CXCR4", 
+              "NES", "DCLK1", "SOX9", "NANOG")
+  )
+
+# 12 chemokine signature in TLS
+chemokine_modules <- list(
+  "chemokine" = c("CCL2", "CCL3", "CCL4", "CCL5", "CCL8", "CCL18", "CCL19", "CCL21",
+                  "CXCL9", "CXCL10", "CXCL11", "CXCL13")
+)
+```
+
+```{r Load MsigDB Pathways}
+hallmark_gene_sets <- 
+  msigdbr(
+    species = "Homo sapiens",
+    category = "H")
+
+hallmark_list <- split(x = hallmark_gene_sets$gene_symbol,
+                       f = hallmark_gene_sets$gs_name)
+
+gomf_gene_sets <-
+  msigdbr(
+    species = "Homo sapiens",
+    category = "C5",
+    subcategory = "GO:MF")
+gomf_list <- split(x = gomf_gene_sets$gene_symbol,
+                   f = gomf_gene_sets$gs_name)
+```
+
+```{r Load Seurat object of TLS structures and surroundings}
+seurat <- readRDS("processed_data/15_A_Picking_Neighbor_Spots/TLS_adjacent_spots.rds")
+```
+
+```{r Check spot counts and positions}
+table(seurat$segment, seurat$TLS_neighbors_2)
+
+# Annotate subjects for regressing out patients in differential expression
+seurat$subject_id <- gsub(".*0", "subject_0", seurat$segment)
+seurat$subject_id <- gsub("[A|B]", "", seurat$subject_id)
+table(seurat$subject_id)
+
+# Annotations of lesion types found in segments
+# segments without neoplasms (without PanIN or PDAC)
+CPsegments <-
+  c("CP01", "CP03", "CP04")
+# segments with PanIN
+PANINsegments <- 
+  c("PANIN03", "PANIN04")
+# segments with PDAC
+PDACsegments <- 
+  c("NRL01", "PDAC01", "PANIN01", "CP05A", "NRL05", "PDAC05")
+images <-
+  c(CPsegments, PANINsegments, PDACsegments)
+
+# create labels for TLS spots based on proximity to non-neoplasms, PanIN, or PDAC
+seurat$TLS_lesion <- sapply(seurat$segment, FUN = function(x){
+  if(x %in% CPsegments){return("CP_TLS")}
+  if(x %in% PANINsegments){return("PanIN_TLS")}
+  if(x %in% PDACsegments){return("PDAC_TLS")}
+})
+
+# correction of the lower TLS in PDAC01 that is CP-associated
+PDAC01_df <- read.csv("processed_data/cloupe/tertiary_lymphoid_structures/PDAC01_TLS.csv")
+PDAC01_barcodes <- paste0(
+  PDAC01_df[PDAC01_df$TLS == "TLS_2",]$Barcode, "_PDAC01")
+seurat@meta.data[colnames(seurat) %in% PDAC01_barcodes,c("TLS_lesion")] <-
+  "CP_TLS"
+
+# correction of upper TLS on CP04 that is most closely associated with PDAC
+CP04_df <- read.csv("processed_data/cloupe/tertiary_lymphoid_structures/CP04_TLS.csv")
+CP04_barcodes <- paste0(
+  CP04_df[CP04_df$TLS == "TLS_1",]$Barcode, "_CP04")
+seurat@meta.data[colnames(seurat) %in% CP04_barcodes,c("TLS_lesion")] <-
+  "PDAC_TLS"
+
+# additional annotation that preserve the distinction of TLS and TLS_neighbors
+seurat$TLS_lesion_neighbor <- 
+  ifelse(
+    grepl("TLS$", seurat$TLS_neighbors_2),
+    seurat$TLS_lesion,
+    gsub("TLS$", "TLS_neighbor", seurat$TLS_lesion)
+  )
+
+# counts of TLS types by segment
+table(seurat$segment, seurat$TLS_lesion_neighbor)
+
+# sanity check of where the TLS and neighbor spots are located
+for(i in images){
+  p <- SpatialDimPlot(seurat, images = i, crop = FALSE) +
+    scale_fill_manual(values = c(
+      "TLS" = "#FF0000",
+      "TLS_neighbor" = "#FFFFFF")) +
+    ggtitle(paste0(i, ": TLS regions"))
+  # print(p)
+  save_spatial_plot_pdf(
+    plot = p,
+    file = paste0(figure_dir, "/", i, "_TLS_sites.pdf"))
+}
+```
+
+```{r ReRun SCT after merging objects with different library sizes}
+# regress out patient id
+seurat <- SCTransform(seurat, assay = "Spatial",
+                      vars.to.regress = "subject_id")
+```
+
+```{r Rerun PCA and UMAP with classifier overlays}
+# PCA of spots from patients
+# determine how much patient or surroundings drive transcriptomic distinction
+seurat <- FindVariableFeatures(seurat, assay = "SCT")
+seurat <- RunPCA(seurat)
+DimPlot(seurat, group.by = "segment", reduction = "pca")
+ElbowPlot(seurat)
+seurat <- FindNeighbors(seurat)
+seurat <- RunUMAP(seurat, dims = 1:15)
+
+DimPlot(seurat, group.by = "segment", reduction = "umap", label = TRUE) +
+  theme(legend.position = "none")
+DimPlot(seurat, group.by = "cell_type_confirmed", reduction = "umap")
+DimPlot(seurat, group.by = "TLS_lesion_neighbor", reduction = "umap")
+DimPlot(seurat, group.by = "TLS", reduction = "umap") +
+  scale_color_manual(values = c(
+      "TLS" = "#FF0000",
+      "TLS_neighbor" = "#FFFFFF"))
+FeaturePlot(seurat, features = "CXCL13", reduction = "umap")
+
+# distributions of raw and normalized counts from patients
+p <- 
+  ggplot(seurat@meta.data,
+         aes(x = .data[["segment"]],
+             y = .data[["nCount_Spatial"]])) +
+  geom_jitter(width = 0.1) +
+  theme() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1))
+print(p)
+p <- 
+  ggplot(seurat@meta.data,
+         aes(x = .data[["segment"]],
+             y = .data[["nCount_SCT"]])) +
+  geom_jitter(width = 0.1) +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1))
+print(p)
+
+# plot counts from the data and scale.data slot
+VlnPlot(seurat, features = "CXCL13", assay = "Spatial")
+VlnPlot(seurat, features = "CXCL13", assay = "SCT")
+
+dim(seurat@assays$Spatial@counts)
+range(seurat@assays$Spatial@counts)
+range(seurat@assays$Spatial@data)
+
+dim(seurat@assays$SCT@counts)
+range(seurat@assays$SCT@counts)
+range(seurat@assays$SCT@data)
+head(summary(seurat@assays$SCT@data))
+range(seurat@assays$SCT@scale.data)
+seurat@assays$SCT@scale.data[1:10, 1:3]
+```
+
+```{r Load CoGAPS Results}
+cogaps_results <- list()
+pattern_targets <- c(10)
+
+for(p in pattern_targets){
+  cogaps_results[[paste0("n", p, "_patterns")]] <-
+    readRDS(
+      paste0("processed_data/16_B_", p, "_Pattern_TLS_CoGAPS/",
+             "cogaps_result_", p, "_patterns.rds")
+    )
+}
+pm_list <- list()
+for(p in pattern_targets){
+  pm_list[[paste0("n", p, "_patterns_markers")]] <-
+    patternMarkers(cogaps_results[[paste0("n", p, "_patterns")]],
+                   threshold = "all")
+}
+```
+
+```{r CoGAPS Pattern Weights Analysis}
+# 10 pattern results
+n10_pat_figure_dir <- paste0(figure_dir, "/n10_pattern_CoGAPS")
+if(!dir.exists(n10_pat_figure_dir)){
+  dir.create(n10_pat_figure_dir)
+}
+
+patterns <- colnames(cogaps_results$n10_patterns@sampleFactors)
+pm <- pm_list$n10_patterns_markers
+
+# save pattern markers
+# save list of pattern markers
+pm_10_genes <- data.frame(lapply(pm_list$n10_patterns_markers$PatternMarkers, 
+                                 "length<-",
+                                 max(lengths(pm_list$n10_patterns_markers$PatternMarkers))))
+
+colnames(pm_10_genes) <- colnames(pm_list$n10_patterns_markers$PatternMarkerRanks)
+
+# Save the dataframe of pattern markers
+write.csv(pm_10_genes,
+          file = paste0(n10_pat_figure_dir, "/CoGAPS_n10_PatternMarker_genes.csv"),
+          na = "")
+
+# pattern weight heatmap across all TLS and TLS_neighbor spots
+segment_cols <- hue_pal()(length(unique(seurat$segment)))
+names(segment_cols) <- unique(seurat$segment)
+patient_cols <- c("subject_01" = brewer_pal(palette = "Set2")(5)[1],
+                  "subject_02" = brewer_pal(palette = "Set2")(5)[2],
+                  "subject_03" = brewer_pal(palette = "Set2")(5)[3],
+                  "subject_04" = brewer_pal(palette = "Set2")(5)[4],
+                  "subject_05" = brewer_pal(palette = "Set2")(5)[5])
+lesion_cols <- c("CP_TLS" = "#007756",
+                 "CP_TLS_neighbor" = "#00F6B3",
+                 "PanIN_TLS" = "#0072B2",
+                 "PanIN_TLS_neighbor" = "#56B4E9",
+                 "PDAC_TLS" = "#8D3666",
+                 "PDAC_TLS_neighbor" = "#E0AFCA")
+cell_anno <- columnAnnotation(
+  segment = seurat$segment,
+  patient = seurat$subject_id,
+  lesion = seurat$TLS_lesion_neighbor,
+  col = list(segment = segment_cols,
+             patient = patient_cols,
+             lesion = lesion_cols)
+)
+cell_anno_noLegend <- columnAnnotation(
+  segment = seurat$segment,
+  patient = seurat$subject_id,
+  lesion = seurat$TLS_lesion_neighbor,
+  col = list(segment = segment_cols,
+             patient = patient_cols,
+             lesion = lesion_cols),
+  show_legend = c(FALSE, FALSE, FALSE)
+)
+
+P_mat <- t(cogaps_results$n10_patterns@sampleFactors)
+col_fun <- viridis_pal(option = "viridis")(100)
+
+pattern_weight_hmap <- 
+  Heatmap(
+    P_mat,
+    col = col_fun,
+    cluster_rows = FALSE,
+    row_names_side = "right",
+    row_names_gp = gpar(fontsize = 8),
+    column_names_gp = gpar(fontsize = 0),
+    name = "Pattern\nWeights",
+    top_annotation = cell_anno
+  )
+pdf(file = paste0(n10_pat_figure_dir,
+                  "/cogaps_heatmap_pattern_matix",
+                  ".pdf"),
+    width = 12, height = 8)
+draw(pattern_weight_hmap)
+dev.off()
+# pattern weights without legend
+pattern_weight_hmap_noLegend <- 
+  Heatmap(
+    P_mat,
+    col = col_fun,
+    cluster_rows = FALSE,
+    row_names_side = "right",
+    row_names_gp = gpar(fontsize = 8),
+    column_names_gp = gpar(fontsize = 0),
+    name = "Pattern\nWeights",
+    top_annotation = cell_anno_noLegend,
+    show_heatmap_legend = FALSE
+  )
+pdf(file = paste0(n10_pat_figure_dir,
+                  "/cogaps_heatmap_pattern_matix_noLegend",
+                  ".pdf"),
+    width = 12, height = 3)
+draw(pattern_weight_hmap_noLegend)
+dev.off()
+
+# add CoGAPS Weights as meta data in the seurat object
+seurat <- add_cogaps_weights(seurat, cogaps_results$n10_patterns)
+
+# pattern boxplots
+for(pat in patterns){
+  plot_pattern_boxplot(seurat = seurat, group_by = "segment", pattern = pat,
+                         save = paste0(n10_pat_figure_dir, "/boxplot_10n_patterns_", 
+                                       "segment_", pat, ".pdf"))
+  plot_pattern_boxplot(seurat = seurat, group_by = "cell_type_confirmed", pattern = pat,
+                         save = paste0(n10_pat_figure_dir, "/boxplot_10n_patterns_", 
+                                       "cell_type_", pat, ".pdf"))
+  plot_pattern_boxplot(seurat = seurat, group_by = "TLS_lesion_neighbor", pattern = pat,
+                         save = paste0(n10_pat_figure_dir, "/boxplot_10n_patterns_", 
+                                       "TLS_lesion_", pat, ".pdf"))
+}
+# spatial overlay of pattern weights
+for(pat in patterns){
+  plot_list <- list()
+  for(i in images){
+    p <- SpatialFeaturePlot(seurat, features = pat, crop = FALSE, 
+                                  images = i, stroke = 0) +
+      scale_fill_viridis_c(limits = c(0,1))
+      # scale_fill_gradientn(limits = c(0, 1), colors = c("#000000", "#00FF00"))
+    ggsave(plot = p,
+           file = paste0(n10_pat_figure_dir, "/spatial_", i, "_", pat, ".pdf"),
+           width = unit(6, "in"), height = unit(6, "in"))
+    plot_list[[i]] <- p
+  }
+  pat_plot <- wrap_plots(plot_list, guides = "keep", ncol = 4, nrow = 4)
+  ggsave(plot = pat_plot,
+         filename = paste0(n10_pat_figure_dir, "/", "multipanel",
+                    "_spatial_pattern_weights_", pat, ".pdf"),
+         width = unit(12, "in"), height = unit(16, "in"))
+}
+
+# comparison of weights across lesion grades
+# TLS only
+tls_meta_data <- seurat[, grepl("TLS$", seurat$TLS_lesion_neighbor)]@meta.data
+my_comparisons <- list(c("CP_TLS", "PanIN_TLS"),
+                       c("PanIN_TLS", "PDAC_TLS"),
+                       c("CP_TLS", "PDAC_TLS"))
+for(pat in patterns){
+  p <- ggplot(tls_meta_data, aes(x = .data[["TLS_lesion_neighbor"]], 
+                                 y = .data[[pat]])) +
+    geom_boxplot(aes(fill = .data[["TLS_lesion_neighbor"]]), outlier.shape = NA) +
+    geom_jitter(aes(shape = .data[["subject_id"]]), width = 0.2) +
+    stat_compare_means(comparisons = my_comparisons,
+                       label.y = c(1.1, 1.2, 1.3)) + 
+    stat_compare_means(label.y = 1.5) +
+    scale_fill_manual(values = c("CP_TLS" = "#007756",
+                                 "PanIN_TLS" = "#0072B2",
+                                 "PDAC_TLS" = "#8D3666")) +
+    theme_bw()
+  print(p)
+  ggsave(plot = p,
+         filename = paste0(n10_pat_figure_dir, "/boxplot_10n_patterns_TLS_stat_", 
+                           pat, ".pdf"),
+         width = unit(6, "in"), height = unit(6, "in"))
+  ggsave(plot = p + theme(legend.position = "none"),
+         filename = paste0(n10_pat_figure_dir, "/boxplot_10n_patterns_TLS_stat_", 
+                           pat, "_noLegend.pdf"),
+         width = unit(6, "in"), height = unit(6, "in"))
+}
+
+# correlation test of pattern 1 with chemokine module score
+chemo_model_fit <- lm(Pattern_1 ~ chemokine_module_score1, data = tls_meta_data)
+fitted <- chemo_model_fit$fitted.values
+plot_df <- cbind(tls_meta_data, fitted)
+summary(chemo_model_fit)
+summary(chemo_model_fit)[8]
+
+lm_label = paste0("slope: ", round(coef(chemo_model_fit)[2],2), "\n",
+                  "intercept: ", round(coef(chemo_model_fit)[1],2), "\n",
+                  "R^2: ", round(summary(chemo_model_fit)$r.squared, 3))
+
+chemo_cor_test <- cor.test(tls_meta_data$chemokine_module_score1,
+                           tls_meta_data$Pattern_1)
+
+cor_label <- paste0("corr: ", signif(chemo_cor_test$estimate, 4), "\n",
+                    "p-value: ", signif(chemo_cor_test$p.value, 4), "\n")
+
+p1_chemo_cor <- ggplot(plot_df, 
+                       aes(x = .data[["chemokine_module_score1"]])) +
+  geom_point(aes(y = .data[["Pattern_1"]],
+                 shape = .data[["subject_id"]]),
+             alpha = 0.6) +
+  geom_smooth(aes(y = .data[["Pattern_1"]]), method = "lm") +
+  theme_bw()
+print(p1_chemo_cor)
+ggsave(plot = p1_chemo_cor + 
+         annotate(geom = "text", x = -0.1, y = 0.8, hjust = 0,
+                  label = lm_label, color = "blue"),
+       filename = paste0(n10_pat_figure_dir, "/correlation_plot_", 
+                         "Pattern_1", "_", "chemokine_mod_score", "_lm_stats.pdf"),
+       width = unit(8, "in"), height = unit(6, "in"))
+ggsave(plot = p1_chemo_cor + 
+         annotate(geom = "text", x = -0.1, y = 0.8, hjust = 0,
+                  label = cor_label, color = "blue"),
+       filename = paste0(n10_pat_figure_dir, "/correlation_plot_", 
+                         "Pattern_1", "_", "chemokine_mod_score", "_cor_stats.pdf"),
+       width = unit(8, "in"), height = unit(6, "in"))
+```
+
+```{r}
+ser_tls <- seurat[,seurat$TLS == "TLS"]
+ser_tls_meta <- ser_tls@meta.data %>% arrange(Pattern_1)
+
+pat1_order <- rownames(
+  ser_tls_meta %>%
+    arrange(Pattern_1)
+  )
+
+# segment_cols <- hue_pal()(length(unique(ser_tls_meta$segment)))
+# names(segment_cols) <- unique(ser_tls_meta$segment)
+patient_cols <- c("subject_01" = brewer_pal(palette = "Set2")(5)[1],
+                  "subject_02" = brewer_pal(palette = "Set2")(5)[2],
+                  "subject_03" = brewer_pal(palette = "Set2")(5)[3],
+                  "subject_04" = brewer_pal(palette = "Set2")(5)[4],
+                  "subject_05" = brewer_pal(palette = "Set2")(5)[5])
+lesion_cols <- c("CP_TLS" = "#007756",
+                 "CP_TLS_neighbor" = "#00F6B3",
+                 "PanIN_TLS" = "#0072B2",
+                 "PanIN_TLS_neighbor" = "#56B4E9",
+                 "PDAC_TLS" = "#8D3666",
+                 "PDAC_TLS_neighbor" = "#E0AFCA")
+pattern_cols <- colorRamp2(c(0,0.5,1), viridis_pal()(3))
+cell_anno <- columnAnnotation(
+  segment = ser_tls_meta$segment,
+  patient = ser_tls_meta$subject_id,
+  lesion = ser_tls_meta$TLS_lesion_neighbor,
+  Pattern_1 = ser_tls_meta$Pattern_1,
+  col = list(segment = segment_cols,
+             patient = patient_cols,
+             lesion = lesion_cols,
+             Pattern_1 = pattern_cols)
+)
+cell_anno_noLegend <- columnAnnotation(
+  segment = ser_tls_meta$segment,
+  patient = ser_tls_meta$subject_id,
+  lesion = ser_tls_meta$TLS_lesion_neighbor,
+  Pattern_1 = ser_tls_meta$Pattern_1,
+  col = list(segment = segment_cols,
+             patient = patient_cols,
+             lesion = lesion_cols,
+             Pattern_1 = pattern_cols),
+  show_legend = c(FALSE, FALSE, FALSE, FALSE)
+)
+
+
+
+# plot_heatmap(seurat = ser_tls, geneset = tls_features,
+#              cell_order = pat1_order, cluster_cells = FALSE,
+#              cellAnnotation = cell_anno)
+
+pat1_top <- rownames(
+  as.data.frame(cogaps_results$n10_patterns@featureLoadings) %>%
+    arrange(-Pattern_1)
+)[1:25]
+
+pdf(file = paste0(figure_dir, "/heatmap_top25_amplitude_Pattern_1.pdf"),
+    width = 10, height = 6)
+plot_heatmap(seurat = ser_tls, geneset = pat1_top,
+             cell_order = pat1_order, 
+             cluster_cells = FALSE,
+             cellAnnotation = cell_anno)
+dev.off()
+
+pdf(file = paste0(figure_dir, "/heatmap_top25_amplitude_Pattern_1_noLegend.pdf"),
+    width = 10, height = 6)
+plot_heatmap(seurat = ser_tls, geneset = pat1_top,
+             cell_order = pat1_order, 
+             cluster_cells = FALSE,
+             cellAnnotation = cell_anno_noLegend,
+             show_heatmap_legend = FALSE)
+dev.off()
+```
+
+```{r Gene plots}
+marker_figure_dir <- paste0(figure_dir, "/TLS_markers")
+if(!dir.exists(marker_figure_dir)){
+  dir.create(marker_figure_dir)
+}
+
+# Ig_genes <- rownames(seurat)[grepl("^IGH", rownames(seurat))]
+Ig_genes <- c("IGHA1","IGHA2","IGHD","IGHE","IGHG1","IGHG2","IGHG3","IGHG4","IGHM")
+
+markers <- c("CD19", "MS4A1", "CR2", "BCL6",
+             "CXCL13", "LTB", "IL21", "CXCR5",
+             Ig_genes, "FOXP3")
+
+for(m in markers){
+  plot_list <- list()
+  for(i in images){
+    p <- SpatialFeaturePlot(seurat, features = m, crop = FALSE, 
+                                  images = i, stroke = 0) 
+      # scale_fill_gradientn(limits = c(0, 1), colors = c("#000000", "#00FF00"))
+    ggsave(plot = p,
+           file = paste0(marker_figure_dir, "/spatial_", i, "_", m, ".pdf"),
+           width = unit(6, "in"), height = unit(6, "in"))
+    plot_list[[i]] <- p
+  }
+  m_plot <- wrap_plots(plot_list, guides = "keep", ncol = 4, nrow = 4)
+  ggsave(plot = m_plot,
+         filename = paste0(marker_figure_dir, "/", "multipanel",
+                    "_spatial_", m, ".pdf"),
+         width = unit(12, "in"), height = unit(16, "in"))
+}
+```
+
+```{r Pattern Weight Associations with Scenic TF Activity}
+auc <- read.csv("processed_data/18_B_TLS_SCENIC/auc_TLS_neighbors.csv")
+colnames(auc) <- gsub("\\.\\.\\.", "", colnames(auc))
+colnames(auc)[-1] <- paste0(colnames(auc)[-1], "_tf.score")
+rownames(auc) <- auc$Cell
+TF_scores <- colnames(auc)[-1]
+
+seurat_TF <- seurat
+seurat_TF@meta.data <- cbind(seurat_TF@meta.data, auc[colnames(seurat),])
+
+s <- c("ETS1_tf.score", "PAX5_tf.score", "NFKB2_tf.score",
+       "FOXP3_tf.score", "GATA3_tf.score", "TBX21_tf.score", "STAT3_tf.score")
+
+TF_score_figure_dir <- paste0(figure_dir, "/TF_scores")
+if(!dir.exists(TF_score_figure_dir)){
+  dir.create(TF_score_figure_dir)
+}
+
+# correlation of TF_scores with patterns of interest
+# Pattern 1 associated with TLS core
+
+# colnames(auc)[grepl("^TCF", colnames(auc))]
+
+pdf(file = paste0(TF_score_figure_dir, "/scenic_pairs", 
+                      "Pattern_1", "_", "lymphocyte_TFs",
+                      ".pdf"),
+    width = 10, height = 10)
+pairs(seurat_TF@meta.data[,c("Pattern_1", s)], lower.panel = NULL)
+dev.off()
+
+# spatial overlay of TF scores
+
+for(score in s){
+  plot_list <- list()
+  for(i in images){
+    p <- SpatialFeaturePlot(seurat_TF, features = score, crop = FALSE, 
+                                  images = i, stroke = 0) +
+      scale_fill_viridis_c(limits = c(0,max(seurat_TF@meta.data[[score]])), 
+                           option = "mako")
+      # scale_fill_gradientn(limits = c(0, 1), colors = c("#000000", "#00FF00"))
+    ggsave(plot = p,
+           file = paste0(TF_score_figure_dir, "/spatial_", i, "_", score, ".pdf"),
+           width = unit(6, "in"), height = unit(6, "in"))
+    plot_list[[i]] <- p
+  }
+  score_plot <- wrap_plots(plot_list, guides = "keep", ncol = 4, nrow = 4)
+  ggsave(plot = score_plot,
+         file = paste0(TF_score_figure_dir, "/", "multipanel",
+                    "_spatial_", score, ".pdf"),
+         width = unit(12, "in"), height = unit(16, "in"))
+}
+
+# complete analysis of the correlation between all 8 patterns and the TF-scores
+tf_cor_res <- data.frame(
+  "transcription.factor" = TF_scores
+)
+for(pat in patterns){
+  cors <- sapply(TF_scores, FUN = function(x){cor(seurat_TF@meta.data[[x]],
+                                                   seurat_TF@meta.data[[pat]])})
+  tf_cor_res[[pat]] <- cors
+}
+# remove rows with NA values
+tf_cor_complete <- tf_cor_res[apply(tf_cor_res, 1, function(x){sum(is.na(x)) == 0}),]
+# correlations with pattern_1 greater than 0.5
+p1_top_cor <- tf_cor_complete[tf_cor_complete$Pattern_1 > 0.75, "transcription.factor"]
+
+
+mat <- as.matrix(tf_cor_complete[, patterns])
+row_highlight <- rowAnnotation(p1_tf = anno_mark(
+  at = which(tf_cor_complete$transcription.factor %in% p1_top_cor),
+  labels = p1_top_cor))
+tf_names <- rowAnnotation(all_tf = anno_text(tf_cor_complete$transcription.factor, gp = gpar(cex = 0.2)))
+col_fun = colorRamp2(c(-1, 0, 1), c("blue", "white", "red"))
+
+hmap <- Heatmap(matrix = mat, right_annotation = row_highlight,
+                col = col_fun, name = "correlation",
+                left_annotation = tf_names,
+                row_names_gp = gpar(cex = 0))
+pdf(file = paste0(TF_score_figure_dir, "/heatmap_TF_pattern_correlations.pdf"),
+    width = 12, height = 20)
+draw(hmap)
+dev.off()
+pdf(file = paste0(TF_score_figure_dir, "/heatmap_TF_pattern_correlations_small.pdf"),
+    width = 6, height = 9)
+draw(hmap)
+dev.off()
+
+# save correlation results
+write.csv(tf_cor_res,
+          file = paste0(result_dir, "/TF_pattern_correlation_matrix.csv"))
+```
+
+```{r CoGAPS Pattern Amplitude analysis}
+# scale A matrix of gene amplitudes for each pattern
+scaled_A <- t(scale(t(cogaps_results[["n10_patterns"]]@featureLoadings)))
+
+# genes to highlight
+mark_genes <-
+  c(
+    "IFI44", "IFI44L", "HLA-DRB5", "GZMB", "GZMA", "CXCL10", # Pattern_1
+    "IL1B", "CD69", "CXCL9", "CXCL11", "NLRP3", "ITGAM", "HLA-DOA", "CD14", # Pattern_2
+    # Pattern_3
+    # Pattern_4
+    "IFI27", "ISG15", "LY6E", "OAS1", "OASL", "SAMD9", "CXCR6", "IL10", "IL7R", "C3", # Pattern_5
+    "COL16A1", "VIM", "ACTA2", "MMP2", "ITGB5", # Pattern_6
+    "BCL3", "CSF1", "ICAM1", "NFKB2", "RELA", "RELB", # Pattern_7
+    "FOS", "FOSB", "IL6", "JUNB", "MYC", "VEGFA", # Pattern_8
+    "PTPRC", "CD19", "MS4A1", "CD3", "CD3G", "CCR7", "MKI67", "PDCD1", # Pattern_9
+    "ABCA12", "APOA1", "APOA2" # Pattern_10
+  )
+
+mark_genes <- mark_genes[mark_genes %in% rownames(scaled_A)]
+
+# heatmap of all pattern markers
+ordered_pm <- NULL
+pattern_assign <- NULL
+for(p in names(pm$PatternMarkers)){
+  ordered_pm <- c(ordered_pm, pm$PatternMarkers[[p]])
+  pattern_assign <- c(pattern_assign, rep(p, length(pm$PatternMarkers[[p]])))
+}
+scaled_A <- scaled_A[ordered_pm,]
+pattern_df <- data.frame(
+  gene = ordered_pm,
+  pattern = pattern_assign
+)
+pat_pal <- hue_pal()(length(names(pm$PatternMarkers)))
+names(pat_pal) <- names(pm$PatternMarkers)
+pattern_anno <- rowAnnotation(
+  pattern_marker = factor(pattern_df$pattern,
+                          levels = paste0("Pattern_", 1:11)),
+  col = list(pattern_marker = pat_pal))
+mark_anno <- rowAnnotation(gene = anno_mark(
+  at = match(mark_genes, rownames(scaled_A)),
+  labels = mark_genes))
+
+pdf(file = paste0(n10_pat_figure_dir,
+                  "/scaled_amplitude_matix",
+                  ".pdf"),
+    width = 8, height = 16)
+Heatmap(
+  scaled_A,
+  cluster_rows = FALSE,
+  cluster_columns = FALSE,
+  show_row_dend = FALSE,
+  row_names_side = "left",
+  row_names_gp = gpar(fontsize = 2),
+  left_annotation = pattern_anno,
+  right_annotation = mark_anno
+)
+dev.off()
+
+# pathways associated with patterns
+for(pat in patterns){
+  pattern_number <- as.numeric(gsub("^Pattern_", "", pat))
+  # HALLMARK
+  fora_res <- fora(pathways = hallmark_list,
+                   genes = pm_list$'10_patterns_markers'$PatternMarkers[[pattern_number]],
+                   universe = rownames(seurat))
+  fora_res <- fora_res %>% mutate(overlapGenes = sapply(overlapGenes, toString))
+  write.csv(fora_res,
+            file = paste0(n10_pat_figure_dir, "/CoGAPS_10_PatternMarker_",
+                          pat, "_ORA_", "HALLMARK", ".csv"))
+  plot_ora_geneset(
+    fora_result = fora_res, title = pat,
+    save = paste0(n10_pat_figure_dir, "/ORA_HALLMARK_", pat, ".pdf")
+  )
+  # GOMF
+  fora_res <- fora(pathways = gomf_list,
+                   genes = pm_list$'10_patterns_markers'$PatternMarkers[[pattern_number]],
+                   universe = rownames(seurat))
+  fora_res <- fora_res %>% mutate(overlapGenes = sapply(overlapGenes, toString))
+  write.csv(fora_res,
+            file = paste0(n10_pat_figure_dir, "/CoGAPS_10_PatternMarker_",
+                          pat, "_ORA_", "GOMF", ".csv"))
+  plot_ora_geneset(
+    fora_result = fora_res, title = pat,
+    save = paste0(n10_pat_figure_dir, "/ORA_GOMF_", pat, ".pdf")
+  )
+}
+
+# query of immune genes among patterns
+# removed from carry over from 16_C
+
+# GOMF chemokines
+pdf(file = paste0(n10_pat_figure_dir, "/pattern_marker_heatmap_",
+                  "GOMF_CHEMOKINE_ACTIVITY",
+                  ".pdf"),
+    width = 8, height = 12)
+pattern_marker_query_heatmap(cogapsResult = cogaps_results$n10_patterns,
+                             patternMarkersResult = pm, 
+                             query_genes = gomf_list$GOMF_CHEMOKINE_ACTIVITY)
+dev.off()
+
+# GOMF chemokine receptor binding ligands
+pdf(file = paste0(n10_pat_figure_dir, "/pattern_marker_heatmap_",
+                  "GOMF_CHEMOKINE_RECEPTOR_BINDING",
+                  ".pdf"),
+    width = 8, height = 12)
+pattern_marker_query_heatmap(cogapsResult = cogaps_results$n10_patterns,
+                             patternMarkersResult = pm, 
+                             query_genes = gomf_list$GOMF_CHEMOKINE_RECEPTOR_BINDING)
+dev.off()
+
+# GOMF immune receptor activity
+pdf(file = paste0(n10_pat_figure_dir, "/pattern_marker_heatmap_",
+                  "GOMF_IMMUNE_RECEPTOR_ACTIVITY",
+                  ".pdf"),
+    width = 8, height = 16)
+pattern_marker_query_heatmap(cogapsResult = cogaps_results$n10_patterns,
+                             patternMarkersResult = pm, 
+                             query_genes = gomf_list$GOMF_IMMUNE_RECEPTOR_ACTIVITY)
+dev.off()
+
+# TLS chemokines
+pdf(file = paste0(n10_pat_figure_dir, "/pattern_marker_heatmap_",
+                  "TLS_chemokine_signature",
+                  ".pdf"),
+    width = 8, height = 12)
+pattern_marker_query_heatmap(cogapsResult = cogaps_results$n10_patterns,
+                             patternMarkersResult = pm, 
+                             query_genes = chemokine_modules$chemokine)
+dev.off()
+
+# HALLMARK EMT 
+pdf(file = paste0(n10_pat_figure_dir, "/pattern_marker_heatmap_",
+                  "HALLMARK_EPITHELIAL_MESENCHYMAL_TRANSITION",
+                  ".pdf"),
+    width = 8, height = 24)
+pattern_marker_query_heatmap(cogapsResult = cogaps_results$n10_patterns,
+                             patternMarkersResult = pm, 
+                             query_genes = hallmark_list$HALLMARK_EPITHELIAL_MESENCHYMAL_TRANSITION)
+dev.off()
+
+# HALLMARK TNFA SIGNALING 
+pdf(file = paste0(n10_pat_figure_dir, "/pattern_marker_heatmap_",
+                  "HALLMARK_TNFA_SIGNALING_VIA_NFKB",
+                  ".pdf"),
+    width = 8, height = 24)
+pattern_marker_query_heatmap(cogapsResult = cogaps_results$n10_patterns,
+                             patternMarkersResult = pm, 
+                             query_genes = hallmark_list$HALLMARK_TNFA_SIGNALING_VIA_NFKB)
+dev.off()
+```
+
+```{r Comparison of Cell Composition surrounding TLS}
+tls_neighbors <- data.frame(segment = images)
+# include proximal lesion information
+tls_neighbors$lesion <- sapply(tls_neighbors$segment, FUN = function(x){
+  if(x %in% CPsegments){return("CP_TLS")}
+  if(x %in% PANINsegments){return("PanIN_TLS")}
+  if(x %in% PDACsegments){return("PDAC_TLS")}
+})
+# count TLS spots
+tls_neighbors$TLS_spots <- sapply(
+  tls_neighbors$segment, FUN = function(x){
+    sum(seurat$segment == x & seurat$TLS_neighbors_2 == "TLS")
+    })
+# count neighboring spots
+tls_neighbors$neighbor_spots <- sapply(
+  tls_neighbors$segment, FUN = function(x){
+    sum(seurat$segment == x & seurat$TLS_neighbors_2 == "TLS_neighbor")
+    })
+# count the number of other cell types 
+cell_types <- unique(seurat$cell_type_confirmed)
+for(cell in cell_types){
+  tls_neighbors[[paste0(cell, "_spots")]] <-
+    sapply(
+    tls_neighbors$segment, FUN = function(x){
+      sum(seurat$segment == x & 
+            seurat$TLS_neighbors_2 == "TLS_neighbor" &
+            seurat$cell_type_confirmed == cell)
+      })
+  
+  tls_neighbors[[paste0(cell, "_proportion")]] <-
+    tls_neighbors[[paste0(cell, "_spots")]] / tls_neighbors$neighbor_spots
+}
+
+# pivot table for plotting stacked cell type proportions
+neighbor_stack <- 
+  pivot_longer(tls_neighbors,
+               cols = colnames(tls_neighbors)[grep("proportion$",
+                                                   colnames(tls_neighbors))])
+neighbor_stack$name <- gsub("_proportion$", "", neighbor_stack$name)
+
+colnames(neighbor_stack) <-
+  gsub("name", "cell_type", 
+       gsub("value", "proportion", colnames(neighbor_stack)))
+# order levels of segments to place the lesion types next to eachother
+neighbor_stack$segment <-
+  factor(neighbor_stack$segment,
+         levels = c(CPsegments, PANINsegments, PDACsegments))
+# order levels of cell types for relevence and easier comparison
+neighbor_stack$cell_type <-
+  factor(neighbor_stack$cell_type,
+         levels = c("acini", "collagen", "islets",
+                    "normal_epithelium", "low_grade_PanIN", "pdac",
+                    "smooth_muscle",
+                    "nontissue", "NA"))
+
+ggplot(neighbor_stack, 
+       aes(x = segment, y = proportion, fill = cell_type)) +
+  geom_bar(position = "stack", stat = "identity") +
+  geom_text(aes(label = neighbor_spots, y = 1.05)) +
+  theme_bw() +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, hjust=1))
+```
+
+```{r Heatmap of Chemokine Signature Expression}
+# # cell order by levels of TLS_lesion and segment
+# TLS_order <- rownames(tls_meta_data)
+# 
+# pdf(file = paste0(figure_dir, "/heatmap_tls_gomf_chemokine_activity_clustered.pdf"),
+#     width = 8, height = 8)
+# plot_heatmap(seurat, 
+#              geneset = gomf_list$GOMF_CHEMOKINE_ACTIVITY,
+#              cellAnnotation = cell_anno)
+# dev.off()
+# pdf(file = paste0(figure_dir, "/heatmap_tls_gomf_chemokine_activity_lesion_ordered.pdf"),
+#     width = 8, height = 8)
+# plot_heatmap(seurat, 
+#              geneset = gomf_list$GOMF_CHEMOKINE_ACTIVITY,
+#              cell_order = TLS_order,
+#              cluster_cells = FALSE,
+#              cellAnnotation = cell_anno)
+# dev.off()
+# 
+# pdf(file = paste0(figure_dir, "/heatmap_tls_chemokine_signature_clustered.pdf"),
+#     width = 8, height = 8)
+# plot_heatmap(seurat, 
+#              geneset = chemokine_modules$chemokine,
+#              cellAnnotation = cell_anno)
+# dev.off()
+# pdf(file = paste0(figure_dir, "/heatmap_tls_chemokine_signature_lesion_ordered.pdf"),
+#     width = 8, height = 8)
+# plot_heatmap(seurat, 
+#              geneset = chemokine_modules$chemokine,
+#              cell_order = TLS_order,
+#              cluster_cells = FALSE,
+#              cellAnnotation = cell_anno)
+# dev.off()
+# 
+# # > range(seurat@assays$SCT@counts[c("CCL8"),])
+# # [1] 0 2
+# # scaling the matrix leads to massive expression value for CCL8 despite being a 
+# # 0 to 2 count UMI comparison
+# 
+# # scaled_mat is highly correlated with SCT@scale.data (r = 0.816). The difference
+# # is probably due to magnitude of scaling of just chemokine vs all genes.
+```
+

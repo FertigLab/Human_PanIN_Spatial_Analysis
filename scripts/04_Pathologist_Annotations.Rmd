@@ -1,0 +1,1057 @@
+---
+title: "04_Pathologist_Annotations"
+author: "Jacob Mitchell"
+date: "2022-12-13"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r Load Packages}
+library(Seurat)
+library(ggplot2)
+library(colorRamps)
+library(plyr)
+library(dplyr)
+
+sessionInfo()
+```
+
+```{r Custom Functions}
+pathologist_filter <- function(segment_name, group_by, pal,
+                               exclusion_dir, assignment_dir,
+                               remove_adipose = TRUE){
+  # load visium data
+  seurat <- readRDS(paste0(data_dir, "/", ser_data[grepl(segment_name, ser_data)]))
+  
+  # rename "cell_type" annotation to "cell_type_CODA"
+  colnames(seurat@meta.data) <- gsub("cell_type",
+                                     "cell_type_CODA",
+                                     colnames(seurat@meta.data))
+  
+  # ensure idents on the Seurat object are the group_by variable
+  # This is due to a bug in SpatialDimPlot where spots will only be colored by
+  # a categorical variable if that variable is the Ident variable
+  Idents(seurat) <- seurat@meta.data[[group_by]]
+  
+  # plot segment before any spots are excluded
+  print(
+    SpatialDimPlot(seurat, crop = FALSE) +
+      scale_fill_manual(values = pal) +
+      guides(fill = guide_legend(title = group_by)) +
+      ggtitle(paste0(segment_name, " : All Barcodes"))
+  )
+  
+  # load spots for exclusion
+  # spots in pieces of tissue that have fragmented apart from the primary segment
+  seg_frag_file <- paste0(exclusion_dir, "/", segment_name, "_tissue_fragment.csv")
+  # spots where the tissue had folded over on itself, creating a doublet-like issue
+  seg_over_file <- paste0(exclusion_dir, "/", segment_name, "_tissue_overlap.csv")
+  
+  tissue_frag <- NULL
+  tissue_over <- NULL
+  
+  if(file.exists(seg_frag_file)){ tissue_frag <- read.csv(seg_frag_file) }
+  if(file.exists(seg_over_file)){ tissue_over <- read.csv(seg_over_file) }
+  
+  exclusion_barcodes <- c(tissue_frag$Barcode,
+                          tissue_over$Barcode)
+  
+  # annotate meta data with exclusion
+  if(length(exclusion_barcodes)){
+    seurat$tissue_artifact <- sapply(
+      colnames(seurat),
+      FUN = function(x){
+        if(x %in% exclusion_barcodes){return(TRUE)}
+        else{return(FALSE)}
+      }
+    )
+  }
+  
+  if(remove_adipose){
+     # highlight adipose spots to be removed
+    if(sum(seurat$cell_type_CODA == "fat")){
+      print(
+        SpatialDimPlot(seurat[, seurat$cell_type_CODA == "fat"], crop = FALSE) +
+          scale_fill_manual(values = pal) +
+          guides(fill = guide_legend(title = group_by)) +
+          ggtitle(paste0(segment_name, " : Adipose Tissue"))
+      )
+    }
+
+    # save dataframe containing barcodes of adipose cells
+    if(sum(seurat$cell_type_CODA == "fat")){
+      # list and save barcodes that were removed as adipose tissue
+      adipose_barcodes <- colnames(seurat[, seurat$cell_type_CODA == "fat"])
+      
+      df <- data.frame("Barcode" = adipose_barcodes,
+                       "cluster" = "fat")
+      write.csv(df,
+                file = paste0(adipose_dir, "/", 
+                              segment_name, "_adipose_barcodes.csv"))
+    }
+  }
+ 
+  # plotting spots to be removed
+  
+  # tissue artifact 
+  if(length(exclusion_barcodes)){
+    ser_artifact <- seurat[,seurat$tissue_artifact]
+    Idents(ser_artifact) <- ser_artifact$tissue_artifact
+    print(
+      SpatialDimPlot(ser_artifact, crop = FALSE) +
+        scale_fill_manual(values = "blue") +
+        guides(fill = guide_legend(title = "tissue_artifact")) +
+        ggtitle(paste0(segment_name, " : Tissue Artifacts"))
+    )
+    print(
+      SpatialDimPlot(seurat[, !seurat$tissue_artifact], crop = FALSE) +
+        scale_fill_manual(values = pal) +
+        guides(fill = guide_legend(title = group_by)) +
+        ggtitle(paste0(segment_name, " : Tissue Artifacts Removed"))
+    )
+  }
+  # show removal of adipose spots
+  if(remove_adipose){
+    print(
+      SpatialDimPlot(seurat[, !seurat$cell_type_CODA == "fat"], crop = FALSE) +
+        scale_fill_manual(values = pal) +
+        guides(fill = guide_legend(title = group_by)) +
+        ggtitle(paste0(segment_name, " : Adipose Tissue Removed"))
+    )
+  }
+  
+  # remove spots
+  if(length(exclusion_barcodes)){
+    seurat <- seurat[,!seurat$tissue_artifact]
+  }
+  if(remove_adipose){
+    seurat <- seurat[, !seurat$cell_type_CODA == "fat"]
+  }
+  
+  # final render of the removed spots
+  print(
+    SpatialDimPlot(seurat, crop = FALSE) +
+      scale_fill_manual(values = pal) +
+      guides(fill = guide_legend(title = group_by)) +
+      ggtitle(paste0(segment_name, " : Filtered Tissues"))
+  )
+  
+  return(seurat)
+}
+
+# consistent palette for CODA cell type annotations
+matlab_pal <- colorRamps::matlab.like2(10)
+CODA_pal <- list(
+  "acini" = matlab_pal[1],
+  "collagen" = matlab_pal[2],
+  "fat" = matlab_pal[3],
+  "islets" = matlab_pal[4],
+  "normal epithelium" = matlab_pal[5],
+  "pdac" = matlab_pal[6],
+  "PanIN" = matlab_pal[7],
+  "smooth muscle" = matlab_pal[8],
+  "nontissue" = matlab_pal[9],
+  "NA" = matlab_pal[10]
+)
+
+confirmed_pal <- list(
+  "acini" = matlab_pal[1],
+  "collagen" = matlab_pal[2],
+  "islets" = matlab_pal[3],
+  "normal epithelium" = matlab_pal[4],
+  "pdac" = matlab_pal[5],
+  "low_grade_PanIN" = matlab_pal[6],
+  "high_grade_PanIN" = matlab_pal[7],
+  "smooth muscle" = matlab_pal[8],
+  "nontissue" = matlab_pal[9],
+  "NA" = matlab_pal[10]
+)
+```
+
+```{r List Visium Results Objects}
+# load seurat objects
+data_dir <- "processed_data/03_CODA_annotated"
+
+# list visium results objects
+ser_data <- list.files(path = data_dir)
+
+# list files containing barcodes for fragment and overlap exclusion
+exclusion_dir <- "processed_data/cloupe/excluded_spots"
+exclusion_data <- list.files(path = exclusion_dir)
+
+# list files containing barcodes for pathologist cell type reassignment
+assignment_dir <- "processed_data/cloupe/grade_assignment_correction"
+assignment_data <- list.files(path = assignment_dir)
+```
+
+```{r Create Results Directories}
+result_dir <- "processed_data/04_Pathologist_Annotations"
+if(!dir.exists(result_dir)){
+  dir.create(result_dir)
+}
+
+figure_dir <- "figures/04_Pathologist_Annotations"
+if(!dir.exists(figure_dir)){
+  dir.create(figure_dir)
+}
+
+# directory for saving barcodes excluded based on CODA assignment as "fat"
+adipose_dir <- paste0(result_dir, "/adipose_barcodes")
+if(!dir.exists(adipose_dir)){
+  dir.create(adipose_dir)
+}
+```
+
+```{r CP01}
+segment_name <- "CP01"
+seurat <- pathologist_filter(segment_name = segment_name, group_by = "cell_type_CODA",
+                             pal = CODA_pal,
+                             exclusion_dir = exclusion_dir,
+                             assignment_dir = assignment_dir)
+
+# pathologist reassignment of epithelial cell grades ##########################
+
+# Pathologist confirmed ducts labeled as PanIN by CODA are normal ducts
+print(
+  SpatialDimPlot(seurat[, seurat$cell_type_CODA == "PanIN"], crop = FALSE) +
+    scale_fill_manual(values = "black")
+)
+
+# replace PanIN annotations with normal epithelium
+
+conversion_table <- data.frame(
+  "old_annotation" = c("PanIN"),
+  "new_annotation" = c("normal epithelium")
+)
+table(seurat$cell_type_CODA)
+new_anno <- plyr::mapvalues(seurat$cell_type_CODA,
+                            from = conversion_table$old_annotation,
+                            to = conversion_table$new_annotation)
+table(new_anno)
+seurat$cell_type_confirmed <- new_anno
+Idents(seurat) <- seurat$cell_type_confirmed
+
+###############################################################################
+
+# append segment name to barcodes
+seurat <- RenameCells(seurat,
+                      new.names = paste0(colnames(seurat), "_", segment_name))
+head(colnames(seurat))
+
+# Plot updated barcodes and annotations
+p <- SpatialDimPlot(seurat, pt.size.factor = 3) +
+  scale_fill_manual(values = CODA_pal) +
+  guides(fill = guide_legend(title = "cell_type_confirmed")) +
+  ggtitle(paste0(segment_name, " : Pathology Corrected Annotation"))
+print(p)
+ggsave(plot = p,
+       filename = paste0(figure_dir, "/spatial_", segment_name,
+                         "_pathology_corrected_annotation.pdf"),
+       width = unit(6, unit = "in"), height = unit(8, unit = "in"))
+# save the segment's Seurat object
+saveRDS(seurat, 
+        file = paste0(result_dir, "/", segment_name,
+                      "_pathology_corrected_annotation.rds"))
+```
+
+```{r NRL01}
+segment_name <- "NRL01"
+seurat <- pathologist_filter(segment_name = segment_name, group_by = "cell_type_CODA",
+                             pal = CODA_pal,
+                             exclusion_dir = exclusion_dir,
+                             assignment_dir = assignment_dir)
+
+# pathologist reassignment of epithelial cell grades ##########################
+
+# Pathologist confirmed CODA annotations match their assessment
+
+table(seurat$cell_type_CODA)
+new_anno <- seurat$cell_type_CODA
+table(new_anno)
+
+seurat$cell_type_confirmed <- new_anno
+Idents(seurat) <- seurat$cell_type_confirmed
+
+###############################################################################
+
+# append segment name to barcodes
+seurat <- RenameCells(seurat,
+                      new.names = paste0(colnames(seurat), "_", segment_name))
+head(colnames(seurat))
+
+# Plot updated barcodes and annotations
+p <- SpatialDimPlot(seurat, pt.size.factor = 3) +
+  scale_fill_manual(values = confirmed_pal) +
+  guides(fill = guide_legend(title = "cell_type_confirmed")) +
+  ggtitle(paste0(segment_name, " : Pathology Corrected Annotation"))
+print(p)
+ggsave(plot = p,
+       filename = paste0(figure_dir, "/spatial_", segment_name,
+                         "_pathology_corrected_annotation.pdf"),
+       width = unit(6, unit = "in"), height = unit(8, unit = "in"))
+# save the segment's Seurat object
+saveRDS(seurat, 
+        file = paste0(result_dir, "/", segment_name,
+                      "_pathology_corrected_annotation.rds"))
+```
+
+```{r PANIN01}
+segment_name <- "PANIN01"
+seurat <- pathologist_filter(segment_name = segment_name, group_by = "cell_type_CODA",
+                             pal = CODA_pal,
+                             exclusion_dir = exclusion_dir,
+                             assignment_dir = assignment_dir)
+
+# pathologist reassignment of epithelial cell grades ##########################
+
+# Pathologist agrees with CODA annotations showing all lesions in this segment
+# are PDAC and there is no PanIN
+
+table(seurat$cell_type_CODA)
+new_anno <- seurat$cell_type_CODA
+table(new_anno)
+
+seurat$cell_type_confirmed <- new_anno
+Idents(seurat) <- seurat$cell_type_confirmed
+
+###############################################################################
+
+# append segment name to barcodes
+seurat <- RenameCells(seurat,
+                      new.names = paste0(colnames(seurat), "_", segment_name))
+head(colnames(seurat))
+
+# Plot updated barcodes and annotations
+p <- SpatialDimPlot(seurat, pt.size.factor = 3) +
+  scale_fill_manual(values = confirmed_pal) +
+  guides(fill = guide_legend(title = "cell_type_confirmed")) +
+  ggtitle(paste0(segment_name, " : Pathology Corrected Annotation"))
+print(p)
+ggsave(plot = p,
+       filename = paste0(figure_dir, "/spatial_", segment_name,
+                         "_pathology_corrected_annotation.pdf"),
+       width = unit(6, unit = "in"), height = unit(8, unit = "in"))
+# save the segment's Seurat object
+saveRDS(seurat, 
+        file = paste0(result_dir, "/", segment_name,
+                      "_pathology_corrected_annotation.rds"))
+```
+
+```{r PDAC01}
+segment_name <- "PDAC01"
+seurat <- pathologist_filter(segment_name = segment_name, group_by = "cell_type_CODA",
+                             pal = CODA_pal,
+                             exclusion_dir = exclusion_dir,
+                             assignment_dir = assignment_dir)
+
+# pathologist reassignment of epithelial cell grades ##########################
+
+# All lesions confirmed to be PDAC
+
+table(seurat$cell_type_CODA)
+new_anno <- seurat$cell_type_CODA
+table(new_anno)
+
+seurat$cell_type_confirmed <- new_anno
+Idents(seurat) <- seurat$cell_type_confirmed
+
+###############################################################################
+
+# append segment name to barcodes
+seurat <- RenameCells(seurat,
+                      new.names = paste0(colnames(seurat), "_", segment_name))
+head(colnames(seurat))
+
+# Plot updated barcodes and annotations
+p <- SpatialDimPlot(seurat, pt.size.factor = 3) +
+  scale_fill_manual(values = confirmed_pal) +
+  guides(fill = guide_legend(title = "cell_type_confirmed")) +
+  ggtitle(paste0(segment_name, " : Pathology Corrected Annotation"))
+print(p)
+ggsave(plot = p,
+       filename = paste0(figure_dir, "/spatial_", segment_name,
+                         "_pathology_corrected_annotation.pdf"),
+       width = unit(6, unit = "in"), height = unit(8, unit = "in"))
+# save the segment's Seurat object
+saveRDS(seurat, 
+        file = paste0(result_dir, "/", segment_name,
+                      "_pathology_corrected_annotation.rds"))
+```
+
+```{r NRL02}
+segment_name <- "NRL02"
+seurat <- pathologist_filter(segment_name = segment_name, group_by = "cell_type_CODA",
+                             pal = CODA_pal,
+                             exclusion_dir = exclusion_dir,
+                             assignment_dir = assignment_dir)
+
+# pathologist reassignment of epithelial cell grades ##########################
+
+# Assessment matches CODA annotations
+
+table(seurat$cell_type_CODA)
+new_anno <- seurat$cell_type_CODA
+table(new_anno)
+
+seurat$cell_type_confirmed <- new_anno
+Idents(seurat) <- seurat$cell_type_confirmed
+
+###############################################################################
+
+# append segment name to barcodes
+seurat <- RenameCells(seurat,
+                      new.names = paste0(colnames(seurat), "_", segment_name))
+head(colnames(seurat))
+
+# Plot updated barcodes and annotations
+p <- SpatialDimPlot(seurat, pt.size.factor = 3) +
+  scale_fill_manual(values = confirmed_pal) +
+  guides(fill = guide_legend(title = "cell_type_confirmed")) +
+  ggtitle(paste0(segment_name, " : Pathology Corrected Annotation"))
+print(p)
+ggsave(plot = p,
+       filename = paste0(figure_dir, "/spatial_", segment_name,
+                         "_pathology_corrected_annotation.pdf"),
+       width = unit(6, unit = "in"), height = unit(8, unit = "in"))
+# save the segment's Seurat object
+saveRDS(seurat, 
+        file = paste0(result_dir, "/", segment_name,
+                      "_pathology_corrected_annotation.rds"))
+```
+
+```{r PANIN02A}
+segment_name <- "PANIN02A"
+seurat <- pathologist_filter(segment_name = segment_name, group_by = "cell_type_CODA",
+                             pal = CODA_pal,
+                             exclusion_dir = exclusion_dir,
+                             assignment_dir = assignment_dir)
+
+# pathologist reassignment of epithelial cell grades ##########################
+
+# One normal duct was found to be low-grade PanIN
+
+# spots picked for annotation update using cloupe browser 4.0.0
+regrade_barcodes <- read.csv(paste0(assignment_dir, "/",
+                                    assignment_data[grepl(segment_name,
+                                                          assignment_data)]))
+
+table(seurat$cell_type_CODA)
+new_anno <- seurat$cell_type_CODA
+
+# replace annotation for associated barcode with low_grade PanIN
+new_anno[colnames(seurat) %in% regrade_barcodes$Barcode] <-
+  "low_grade_PanIN"
+
+table(new_anno)
+
+seurat$cell_type_confirmed <- new_anno
+Idents(seurat) <- seurat$cell_type_confirmed
+
+###############################################################################
+
+# append segment name to barcodes
+seurat <- RenameCells(seurat,
+                      new.names = paste0(colnames(seurat), "_", segment_name))
+head(colnames(seurat))
+
+# Plot updated barcodes and annotations
+p <- SpatialDimPlot(seurat, pt.size.factor = 3) +
+  scale_fill_manual(values = confirmed_pal) +
+  guides(fill = guide_legend(title = "cell_type_confirmed")) +
+  ggtitle(paste0(segment_name, " : Pathology Corrected Annotation"))
+print(p)
+ggsave(plot = p,
+       filename = paste0(figure_dir, "/spatial_", segment_name,
+                         "_pathology_corrected_annotation.pdf"),
+       width = unit(6, unit = "in"), height = unit(8, unit = "in"))
+# save the segment's Seurat object
+saveRDS(seurat, 
+        file = paste0(result_dir, "/", segment_name,
+                      "_pathology_corrected_annotation.rds"))
+```
+
+```{r PANIN02B}
+segment_name <- "PANIN02B"
+seurat <- pathologist_filter(segment_name = segment_name, group_by = "cell_type_CODA",
+                             pal = CODA_pal,
+                             exclusion_dir = exclusion_dir,
+                             assignment_dir = assignment_dir)
+
+# pathologist reassignment of epithelial cell grades ##########################
+
+# All PanIN Lesions graded as low-grade
+
+table(seurat$cell_type_CODA)
+new_anno <- seurat$cell_type_CODA
+new_anno[new_anno == "PanIN"] <- "low_grade_PanIN"
+table(new_anno)
+
+seurat$cell_type_confirmed <- new_anno
+Idents(seurat) <- seurat$cell_type_confirmed
+
+###############################################################################
+
+# append segment name to barcodes
+seurat <- RenameCells(seurat,
+                      new.names = paste0(colnames(seurat), "_", segment_name))
+head(colnames(seurat))
+
+# Plot updated barcodes and annotations
+p <- SpatialDimPlot(seurat, pt.size.factor = 3) +
+  scale_fill_manual(values = confirmed_pal) +
+  guides(fill = guide_legend(title = "cell_type_confirmed")) +
+  ggtitle(paste0(segment_name, " : Pathology Corrected Annotation"))
+print(p)
+ggsave(plot = p,
+       filename = paste0(figure_dir, "/spatial_", segment_name,
+                         "_pathology_corrected_annotation.pdf"),
+       width = unit(6, unit = "in"), height = unit(8, unit = "in"))
+# save the segment's Seurat object
+saveRDS(seurat, 
+        file = paste0(result_dir, "/", segment_name,
+                      "_pathology_corrected_annotation.rds"))
+```
+
+```{r PDAC02}
+segment_name <- "PDAC02"
+seurat <- pathologist_filter(segment_name = segment_name, group_by = "cell_type_CODA",
+                             pal = CODA_pal,
+                             exclusion_dir = exclusion_dir,
+                             assignment_dir = assignment_dir)
+
+# pathologist reassignment of epithelial cell grades ##########################
+
+# Lesions called as PanIN were graded as PDAC
+
+table(seurat$cell_type_CODA)
+new_anno <- seurat$cell_type_CODA
+new_anno[new_anno == "PanIN"] <- "pdac"
+table(new_anno)
+
+seurat$cell_type_confirmed <- new_anno
+Idents(seurat) <- seurat$cell_type_confirmed
+
+###############################################################################
+
+# append segment name to barcodes
+seurat <- RenameCells(seurat,
+                      new.names = paste0(colnames(seurat), "_", segment_name))
+head(colnames(seurat))
+
+# Plot updated barcodes and annotations
+p <- SpatialDimPlot(seurat, pt.size.factor = 3) +
+  scale_fill_manual(values = confirmed_pal) +
+  guides(fill = guide_legend(title = "cell_type_confirmed")) +
+  ggtitle(paste0(segment_name, " : Pathology Corrected Annotation"))
+print(p)
+ggsave(plot = p,
+       filename = paste0(figure_dir, "/spatial_", segment_name,
+                         "_pathology_corrected_annotation.pdf"),
+       width = unit(6, unit = "in"), height = unit(8, unit = "in"))
+# save the segment's Seurat object
+saveRDS(seurat, 
+        file = paste0(result_dir, "/", segment_name,
+                      "_pathology_corrected_annotation.rds"))
+```
+
+```{r CP03}
+segment_name <- "CP03"
+seurat <- pathologist_filter(segment_name = segment_name, group_by = "cell_type_CODA",
+                             pal = CODA_pal,
+                             exclusion_dir = exclusion_dir,
+                             assignment_dir = assignment_dir)
+
+# pathologist reassignment of epithelial cell grades ##########################
+
+# PanIN lesion called is actually an inflamed duct. No spots called as majority PanIN
+
+table(seurat$cell_type_CODA)
+new_anno <- seurat$cell_type_CODA
+table(new_anno)
+
+seurat$cell_type_confirmed <- new_anno
+Idents(seurat) <- seurat$cell_type_confirmed
+
+###############################################################################
+
+# append segment name to barcodes
+seurat <- RenameCells(seurat,
+                      new.names = paste0(colnames(seurat), "_", segment_name))
+head(colnames(seurat))
+
+# Plot updated barcodes and annotations
+p <- SpatialDimPlot(seurat, pt.size.factor = 3) +
+  scale_fill_manual(values = confirmed_pal) +
+  guides(fill = guide_legend(title = "cell_type_confirmed")) +
+  ggtitle(paste0(segment_name, " : Pathology Corrected Annotation"))
+print(p)
+ggsave(plot = p,
+       filename = paste0(figure_dir, "/spatial_", segment_name,
+                         "_pathology_corrected_annotation.pdf"),
+       width = unit(6, unit = "in"), height = unit(8, unit = "in"))
+# save the segment's Seurat object
+saveRDS(seurat, 
+        file = paste0(result_dir, "/", segment_name,
+                      "_pathology_corrected_annotation.rds"))
+```
+
+```{r NRL03}
+segment_name <- "NRL03"
+seurat <- pathologist_filter(segment_name = segment_name, group_by = "cell_type_CODA",
+                             pal = CODA_pal,
+                             exclusion_dir = exclusion_dir,
+                             assignment_dir = assignment_dir)
+
+# pathologist reassignment of epithelial cell grades ##########################
+
+# Lesions called as PanIN are a retention cyst artifact
+
+table(seurat$cell_type_CODA)
+new_anno <- seurat$cell_type_CODA
+new_anno[new_anno == "PanIN"] <- "nontissue"
+table(new_anno)
+
+seurat$cell_type_confirmed <- new_anno
+Idents(seurat) <- seurat$cell_type_confirmed
+
+###############################################################################
+
+# append segment name to barcodes
+seurat <- RenameCells(seurat,
+                      new.names = paste0(colnames(seurat), "_", segment_name))
+head(colnames(seurat))
+
+# Plot updated barcodes and annotations
+p <- SpatialDimPlot(seurat, pt.size.factor = 3) +
+  scale_fill_manual(values = confirmed_pal) +
+  guides(fill = guide_legend(title = "cell_type_confirmed")) +
+  ggtitle(paste0(segment_name, " : Pathology Corrected Annotation"))
+print(p)
+ggsave(plot = p,
+       filename = paste0(figure_dir, "/spatial_", segment_name,
+                         "_pathology_corrected_annotation.pdf"),
+       width = unit(6, unit = "in"), height = unit(8, unit = "in"))
+# save the segment's Seurat object
+saveRDS(seurat, 
+        file = paste0(result_dir, "/", segment_name,
+                      "_pathology_corrected_annotation.rds"))
+```
+
+```{r PANIN03}
+segment_name <- "PANIN03"
+seurat <- pathologist_filter(segment_name = segment_name, group_by = "cell_type_CODA",
+                             pal = CODA_pal,
+                             exclusion_dir = exclusion_dir,
+                             assignment_dir = assignment_dir)
+
+# pathologist reassignment of epithelial cell grades ##########################
+
+# PanIN Ducts found were annotated as high-grade
+
+table(seurat$cell_type_CODA)
+new_anno <- seurat$cell_type_CODA
+new_anno[new_anno == "PanIN"] <- "high_grade_PanIN"
+table(new_anno)
+
+seurat$cell_type_confirmed <- new_anno
+Idents(seurat) <- seurat$cell_type_confirmed
+
+###############################################################################
+
+# append segment name to barcodes
+seurat <- RenameCells(seurat,
+                      new.names = paste0(colnames(seurat), "_", segment_name))
+head(colnames(seurat))
+
+# Plot updated barcodes and annotations
+p <- SpatialDimPlot(seurat, pt.size.factor = 3) +
+  scale_fill_manual(values = confirmed_pal) +
+  guides(fill = guide_legend(title = "cell_type_confirmed")) +
+  ggtitle(paste0(segment_name, " : Pathology Corrected Annotation"))
+print(p)
+ggsave(plot = p,
+       filename = paste0(figure_dir, "/spatial_", segment_name,
+                         "_pathology_corrected_annotation.pdf"),
+       width = unit(6, unit = "in"), height = unit(8, unit = "in"))
+# save the segment's Seurat object
+saveRDS(seurat, 
+        file = paste0(result_dir, "/", segment_name,
+                      "_pathology_corrected_annotation.rds"))
+```
+
+```{r PDAC03}
+segment_name <- "PDAC03"
+seurat <- pathologist_filter(segment_name = segment_name, group_by = "cell_type_CODA",
+                             pal = CODA_pal,
+                             exclusion_dir = exclusion_dir,
+                             assignment_dir = assignment_dir)
+
+# pathologist reassignment of epithelial cell grades ##########################
+
+# Region called as PanIN is an artifact of overlapping tissue removed
+# by the tissue artifact filtering
+
+table(seurat$cell_type_CODA)
+new_anno <- seurat$cell_type_CODA
+table(new_anno)
+
+seurat$cell_type_confirmed <- new_anno
+Idents(seurat) <- seurat$cell_type_confirmed
+
+###############################################################################
+
+# append segment name to barcodes
+seurat <- RenameCells(seurat,
+                      new.names = paste0(colnames(seurat), "_", segment_name))
+head(colnames(seurat))
+
+# Plot updated barcodes and annotations
+p <- SpatialDimPlot(seurat, pt.size.factor = 3) +
+  scale_fill_manual(values = confirmed_pal) +
+  guides(fill = guide_legend(title = "cell_type_confirmed")) +
+  ggtitle(paste0(segment_name, " : Pathology Corrected Annotation"))
+print(p)
+ggsave(plot = p,
+       filename = paste0(figure_dir, "/spatial_", segment_name,
+                         "_pathology_corrected_annotation.pdf"),
+       width = unit(6, unit = "in"), height = unit(8, unit = "in"))
+# save the segment's Seurat object
+saveRDS(seurat, 
+        file = paste0(result_dir, "/", segment_name,
+                      "_pathology_corrected_annotation.rds"))
+```
+
+```{r CP04}
+segment_name <- "CP04"
+seurat <- pathologist_filter(segment_name = segment_name, group_by = "cell_type_CODA",
+                             pal = CODA_pal,
+                             exclusion_dir = exclusion_dir,
+                             assignment_dir = assignment_dir)
+
+# pathologist reassignment of epithelial cell grades ##########################
+
+# Regions called as PanIN were all low-grade
+
+table(seurat$cell_type_CODA)
+new_anno <- seurat$cell_type_CODA
+new_anno[new_anno == "PanIN"] <- "low_grade_PanIN"
+table(new_anno)
+
+seurat$cell_type_confirmed <- new_anno
+Idents(seurat) <- seurat$cell_type_confirmed
+
+###############################################################################
+
+# append segment name to barcodes
+seurat <- RenameCells(seurat,
+                      new.names = paste0(colnames(seurat), "_", segment_name))
+head(colnames(seurat))
+
+# Plot updated barcodes and annotations
+p <- SpatialDimPlot(seurat, pt.size.factor = 3) +
+  scale_fill_manual(values = confirmed_pal) +
+  guides(fill = guide_legend(title = "cell_type_confirmed")) +
+  ggtitle(paste0(segment_name, " : Pathology Corrected Annotation"))
+print(p)
+ggsave(plot = p,
+       filename = paste0(figure_dir, "/spatial_", segment_name,
+                         "_pathology_corrected_annotation.pdf"),
+       width = unit(6, unit = "in"), height = unit(8, unit = "in"))
+# save the segment's Seurat object
+saveRDS(seurat, 
+        file = paste0(result_dir, "/", segment_name,
+                      "_pathology_corrected_annotation.rds"))
+```
+
+```{r NRL04}
+segment_name <- "NRL04"
+seurat <- pathologist_filter(segment_name = segment_name, group_by = "cell_type_CODA",
+                             pal = CODA_pal,
+                             exclusion_dir = exclusion_dir,
+                             assignment_dir = assignment_dir)
+
+# pathologist reassignment of epithelial cell grades ##########################
+
+# Regions called as PanIN were all low-grade
+
+table(seurat$cell_type_CODA)
+new_anno <- seurat$cell_type_CODA
+new_anno[new_anno == "PanIN"] <- "low_grade_PanIN"
+table(new_anno)
+
+seurat$cell_type_confirmed <- new_anno
+Idents(seurat) <- seurat$cell_type_confirmed
+
+###############################################################################
+
+# append segment name to barcodes
+seurat <- RenameCells(seurat,
+                      new.names = paste0(colnames(seurat), "_", segment_name))
+head(colnames(seurat))
+
+# Plot updated barcodes and annotations
+p <- SpatialDimPlot(seurat, pt.size.factor = 3) +
+  scale_fill_manual(values = confirmed_pal) +
+  guides(fill = guide_legend(title = "cell_type_confirmed")) +
+  ggtitle(paste0(segment_name, " : Pathology Corrected Annotation"))
+print(p)
+ggsave(plot = p,
+       filename = paste0(figure_dir, "/spatial_", segment_name,
+                         "_pathology_corrected_annotation.pdf"),
+       width = unit(6, unit = "in"), height = unit(8, unit = "in"))
+# save the segment's Seurat object
+saveRDS(seurat, 
+        file = paste0(result_dir, "/", segment_name,
+                      "_pathology_corrected_annotation.rds"))
+```
+
+```{r PANIN04}
+segment_name <- "PANIN04"
+seurat <- pathologist_filter(segment_name = segment_name, group_by = "cell_type_CODA",
+                             pal = CODA_pal,
+                             exclusion_dir = exclusion_dir,
+                             assignment_dir = assignment_dir)
+
+# pathologist reassignment of epithelial cell grades ##########################
+
+# Regions called as PanIN were all low-grade
+
+table(seurat$cell_type_CODA)
+new_anno <- seurat$cell_type_CODA
+new_anno[new_anno == "PanIN"] <- "low_grade_PanIN"
+table(new_anno)
+
+seurat$cell_type_confirmed <- new_anno
+Idents(seurat) <- seurat$cell_type_confirmed
+
+###############################################################################
+
+# append segment name to barcodes
+seurat <- RenameCells(seurat,
+                      new.names = paste0(colnames(seurat), "_", segment_name))
+head(colnames(seurat))
+
+# Plot updated barcodes and annotations
+p <- SpatialDimPlot(seurat, pt.size.factor = 3) +
+  scale_fill_manual(values = confirmed_pal) +
+  guides(fill = guide_legend(title = "cell_type_confirmed")) +
+  ggtitle(paste0(segment_name, " : Pathology Corrected Annotation"))
+print(p)
+ggsave(plot = p,
+       filename = paste0(figure_dir, "/spatial_", segment_name,
+                         "_pathology_corrected_annotation.pdf"),
+       width = unit(6, unit = "in"), height = unit(8, unit = "in"))
+# save the segment's Seurat object
+saveRDS(seurat, 
+        file = paste0(result_dir, "/", segment_name,
+                      "_pathology_corrected_annotation.rds"))
+```
+
+```{r PDAC04}
+segment_name <- "PDAC04"
+seurat <- pathologist_filter(segment_name = segment_name, group_by = "cell_type_CODA",
+                             pal = CODA_pal,
+                             exclusion_dir = exclusion_dir,
+                             assignment_dir = assignment_dir)
+
+# pathologist reassignment of epithelial cell grades ##########################
+
+# segment is poor quality and will not be included in subsequent analysis
+
+table(seurat$cell_type_CODA)
+new_anno <- seurat$cell_type_CODA
+table(new_anno)
+
+seurat$cell_type_confirmed <- new_anno
+Idents(seurat) <- seurat$cell_type_confirmed
+
+###############################################################################
+
+# append segment name to barcodes
+seurat <- RenameCells(seurat,
+                      new.names = paste0(colnames(seurat), "_", segment_name))
+head(colnames(seurat))
+
+# Plot updated barcodes and annotations
+p <- SpatialDimPlot(seurat, pt.size.factor = 3) +
+  scale_fill_manual(values = confirmed_pal) +
+  guides(fill = guide_legend(title = "cell_type_confirmed")) +
+  ggtitle(paste0(segment_name, " : Pathology Corrected Annotation"))
+print(p)
+ggsave(plot = p,
+       filename = paste0(figure_dir, "/spatial_", segment_name,
+                         "_pathology_corrected_annotation.pdf"),
+       width = unit(6, unit = "in"), height = unit(8, unit = "in"))
+# save the segment's Seurat object
+saveRDS(seurat, 
+        file = paste0(result_dir, "/", segment_name,
+                      "_pathology_corrected_annotation.rds"))
+```
+
+```{r CP05A}
+segment_name <- "CP05A"
+seurat <- pathologist_filter(segment_name = segment_name, group_by = "cell_type_CODA",
+                             pal = CODA_pal,
+                             exclusion_dir = exclusion_dir,
+                             assignment_dir = assignment_dir)
+
+# pathologist reassignment of epithelial cell grades ##########################
+
+# No spots called majority PanIN
+
+table(seurat$cell_type_CODA)
+new_anno <- seurat$cell_type_CODA
+table(new_anno)
+
+seurat$cell_type_confirmed <- new_anno
+Idents(seurat) <- seurat$cell_type_confirmed
+
+###############################################################################
+
+# append segment name to barcodes
+seurat <- RenameCells(seurat,
+                      new.names = paste0(colnames(seurat), "_", segment_name))
+head(colnames(seurat))
+
+# Plot updated barcodes and annotations
+p <- SpatialDimPlot(seurat, pt.size.factor = 3) +
+  scale_fill_manual(values = confirmed_pal) +
+  guides(fill = guide_legend(title = "cell_type_confirmed")) +
+  ggtitle(paste0(segment_name, " : Pathology Corrected Annotation"))
+print(p)
+ggsave(plot = p,
+       filename = paste0(figure_dir, "/spatial_", segment_name,
+                         "_pathology_corrected_annotation.pdf"),
+       width = unit(6, unit = "in"), height = unit(8, unit = "in"))
+# save the segment's Seurat object
+saveRDS(seurat, 
+        file = paste0(result_dir, "/", segment_name,
+                      "_pathology_corrected_annotation.rds"))
+```
+
+```{r CP05B}
+segment_name <- "CP05B"
+seurat <- pathologist_filter(segment_name = segment_name, group_by = "cell_type_CODA",
+                             pal = CODA_pal,
+                             exclusion_dir = exclusion_dir,
+                             assignment_dir = assignment_dir)
+
+# pathologist reassignment of epithelial cell grades ##########################
+
+# All PanIN lesions are low-grade
+
+table(seurat$cell_type_CODA)
+new_anno <- seurat$cell_type_CODA
+new_anno[new_anno == "PanIN"] <- "low_grade_PanIN"
+table(new_anno)
+
+seurat$cell_type_confirmed <- new_anno
+Idents(seurat) <- seurat$cell_type_confirmed
+
+###############################################################################
+
+# append segment name to barcodes
+seurat <- RenameCells(seurat,
+                      new.names = paste0(colnames(seurat), "_", segment_name))
+head(colnames(seurat))
+
+# Plot updated barcodes and annotations
+p <- SpatialDimPlot(seurat, pt.size.factor = 3) +
+  scale_fill_manual(values = confirmed_pal) +
+  guides(fill = guide_legend(title = "cell_type_confirmed")) +
+  ggtitle(paste0(segment_name, " : Pathology Corrected Annotation"))
+print(p)
+ggsave(plot = p,
+       filename = paste0(figure_dir, "/spatial_", segment_name,
+                         "_pathology_corrected_annotation.pdf"),
+       width = unit(6, unit = "in"), height = unit(8, unit = "in"))
+# save the segment's Seurat object
+saveRDS(seurat, 
+        file = paste0(result_dir, "/", segment_name,
+                      "_pathology_corrected_annotation.rds"))
+```
+
+```{r NRL05}
+segment_name <- "NRL05"
+seurat <- pathologist_filter(segment_name = segment_name, group_by = "cell_type_CODA",
+                             pal = CODA_pal,
+                             exclusion_dir = exclusion_dir,
+                             assignment_dir = assignment_dir)
+
+# pathologist reassignment of epithelial cell grades ##########################
+
+# No PanIN spots identified, only PDAC
+
+table(seurat$cell_type_CODA)
+new_anno <- seurat$cell_type_CODA
+table(new_anno)
+
+seurat$cell_type_confirmed <- new_anno
+Idents(seurat) <- seurat$cell_type_confirmed
+
+###############################################################################
+
+# append segment name to barcodes
+seurat <- RenameCells(seurat,
+                      new.names = paste0(colnames(seurat), "_", segment_name))
+head(colnames(seurat))
+
+# Plot updated barcodes and annotations
+p <- SpatialDimPlot(seurat, pt.size.factor = 3) +
+  scale_fill_manual(values = confirmed_pal) +
+  guides(fill = guide_legend(title = "cell_type_confirmed")) +
+  ggtitle(paste0(segment_name, " : Pathology Corrected Annotation"))
+print(p)
+ggsave(plot = p,
+       filename = paste0(figure_dir, "/spatial_", segment_name,
+                         "_pathology_corrected_annotation.pdf"),
+       width = unit(6, unit = "in"), height = unit(8, unit = "in"))
+# save the segment's Seurat object
+saveRDS(seurat, 
+        file = paste0(result_dir, "/", segment_name,
+                      "_pathology_corrected_annotation.rds"))
+```
+
+```{r PDAC05}
+segment_name <- "PDAC05"
+seurat <- pathologist_filter(segment_name = segment_name, group_by = "cell_type_CODA",
+                             pal = CODA_pal,
+                             exclusion_dir = exclusion_dir,
+                             assignment_dir = assignment_dir)
+
+# pathologist reassignment of epithelial cell grades ##########################
+
+# All lesions graded as PDAC
+
+table(seurat$cell_type_CODA)
+new_anno <- seurat$cell_type_CODA
+table(new_anno)
+
+seurat$cell_type_confirmed <- new_anno
+Idents(seurat) <- seurat$cell_type_confirmed
+
+###############################################################################
+
+# append segment name to barcodes
+seurat <- RenameCells(seurat,
+                      new.names = paste0(colnames(seurat), "_", segment_name))
+head(colnames(seurat))
+
+# Plot updated barcodes and annotations
+p <- SpatialDimPlot(seurat, pt.size.factor = 3) +
+  scale_fill_manual(values = confirmed_pal) +
+  guides(fill = guide_legend(title = "cell_type_confirmed")) +
+  ggtitle(paste0(segment_name, " : Pathology Corrected Annotation"))
+print(p)
+ggsave(plot = p,
+       filename = paste0(figure_dir, "/spatial_", segment_name,
+                         "_pathology_corrected_annotation.pdf"),
+       width = unit(6, unit = "in"), height = unit(8, unit = "in"))
+# save the segment's Seurat object
+saveRDS(seurat, 
+        file = paste0(result_dir, "/", segment_name,
+                      "_pathology_corrected_annotation.rds"))
+```

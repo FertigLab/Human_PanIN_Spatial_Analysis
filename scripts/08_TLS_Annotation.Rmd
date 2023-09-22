@@ -1,0 +1,289 @@
+---
+title: "08_TLS_Annotation"
+author: "Jacob Mitchell"
+date: "2023-01-17"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(Seurat)
+library(ggplot2)
+library(colorRamps)
+library(plyr)
+library(dplyr)
+
+sessionInfo()
+```
+
+```{r}
+annotate_TLS <- function(seurat, anno_dir, segments,
+                         figure_dir = NULL, show = TRUE){
+  # read data frames of reannotated spots
+  anno_files <- paste0(anno_dir, "/", segments, "_TLS.csv")
+  anno_data <- list()
+  for(s in segments){
+    anno_data[[s]] <- read.csv(anno_files[grepl(paste0(s, "_TLS.csv$"), anno_files)])
+    # append segment name to barcode
+    anno_data[[s]][["Barcode"]] <- 
+      paste0(anno_data[[s]][["Barcode"]], "_", s)
+  }
+  
+  # rbind the reannotated spot names
+  anno_df <- bind_rows(anno_data)
+  
+  # create new meta data column specifying TLS
+  seurat$TLS <- colnames(seurat) %in% anno_df$Barcode
+  
+  print(table(seurat$TLS, seurat$segment))
+  Idents(seurat) <- seurat$TLS
+  for(s in segments){
+    p <- SpatialDimPlot(seurat, images = s) +
+      scale_fill_manual(values = c("#FFFFFF", "#000000")) +
+      ggtitle(paste0(s, ": Tertiary Lymphoid Structures"))
+    if(show){print(p)}
+    if(!is.null(figure_dir)){
+      ggsave(plot = p,
+             filename = paste0(figure_dir, "/", s, "_TLS_annotation.png"),
+             width = unit(6, "in"), height = unit(6, "in"))
+    }
+  }
+  return(seurat)
+}
+```
+
+```{r Create Directories}
+result_dir <- "processed_data/08_TLS_Annotation"
+if(!dir.exists(result_dir)){
+  dir.create(result_dir)
+}
+
+figure_dir <- "figures/08_TLS_Annotation"
+if(!dir.exists(figure_dir)){
+  dir.create(figure_dir)
+}
+
+anno_dir <- "processed_data/cloupe/tertiary_lymphoid_structures"
+```
+
+```{r Subject 01}
+seurat <- readRDS("processed_data/07_Per_Patient_Dim_Reduction/subject_01_DimReduced.rds")
+
+segments <- c("CP01", "NRL01", "PANIN01", "PDAC01")
+seurat <- annotate_TLS(seurat = seurat, anno_dir = anno_dir,
+                       segments = segments,
+                       figure_dir = figure_dir, show = TRUE)
+# grade the TLS types based on the lesion type in close proximity
+anno_files <- paste0(anno_dir, "/", segments, "_TLS.csv")
+anno_data <- list()
+# CP01: 1 CP_TLS
+s <- "CP01"
+anno_data[[s]] <- read.csv(anno_files[grepl(paste0(s, "_TLS.csv$"), anno_files)])
+anno_data[[s]][["Barcode"]] <- paste0(anno_data[[s]][["Barcode"]], "_", s)
+anno_data[[s]][["TLS_lesion"]] <- 
+  plyr::mapvalues(
+    x = anno_data[[s]][["TLS"]],
+    from = c("TLS_1"),
+    to = c("CP_TLS")
+  )
+# NRL01: 3 PDAC_TLS
+s <- "NRL01"
+anno_data[[s]] <- read.csv(anno_files[grepl(paste0(s, "_TLS.csv$"), anno_files)])
+anno_data[[s]][["Barcode"]] <- paste0(anno_data[[s]][["Barcode"]], "_", s)
+anno_data[[s]][["TLS_lesion"]] <- 
+  plyr::mapvalues(
+    x = anno_data[[s]][["TLS"]],
+    from = c("TLS_1", "TLS_2", "TLS_3"),
+    to = c("PDAC_TLS", "PDAC_TLS", "PDAC_TLS")
+  )
+# PANIN01: 8 PDAC_TLS
+s <- "PANIN01"
+anno_data[[s]] <- read.csv(anno_files[grepl(paste0(s, "_TLS.csv$"), anno_files)])
+anno_data[[s]][["Barcode"]] <- paste0(anno_data[[s]][["Barcode"]], "_", s)
+anno_data[[s]][["TLS_lesion"]] <- 
+  plyr::mapvalues(
+    x = anno_data[[s]][["TLS"]],
+    from = c("TLS_1", "TLS_2", "TLS_3", "TLS_4", "TLS_5", "TLS_6", "TLS_7", "TLS_8"),
+    to = c("PDAC_TLS", "PDAC_TLS", "PDAC_TLS", "PDAC_TLS", "PDAC_TLS", "PDAC_TLS", "PDAC_TLS", "PDAC_TLS")
+  )
+# PDAC01: 1 PDAC_TLS, 1 CP_TLS
+s <- "PDAC01"
+anno_data[[s]] <- read.csv(anno_files[grepl(paste0(s, "_TLS.csv$"), anno_files)])
+anno_data[[s]][["Barcode"]] <- paste0(anno_data[[s]][["Barcode"]], "_", s)
+anno_data[[s]][["TLS_lesion"]] <- 
+  plyr::mapvalues(
+    x = anno_data[[s]][["TLS"]],
+    from = c("TLS_1", "TLS_2"),
+    to = c("PDAC_TLS", "CP_TLS")
+  )
+anno_df <- bind_rows(anno_data)
+lesion_anno <- plyr::mapvalues(
+  x = colnames(seurat),
+  from = anno_df[["Barcode"]],
+  to = anno_df[["TLS_lesion"]]
+)
+lesion_anno[!grepl("TLS$", lesion_anno)] <- NA
+seurat$TLS_lesion <- lesion_anno
+
+saveRDS(seurat,
+        file = paste0(result_dir, "/subject_01_TLS_annotation.rds"))
+rm(seurat)
+```
+
+```{r Subject 02}
+# after the reannotation of TLSs across patients, there are no applicable TLSs
+# from patient 2
+
+# This creates an RDS file for later merging across all 5 patients
+seurat <- readRDS("processed_data/07_Per_Patient_Dim_Reduction/subject_02_DimReduced.rds")
+seurat$TLS <- FALSE
+seurat$TLS_lesion <- NA
+saveRDS(seurat,
+        file = paste0(result_dir, "/subject_02_TLS_annotation.rds"))
+rm(seurat)
+```
+
+```{r Subject 03}
+seurat <- readRDS("processed_data/07_Per_Patient_Dim_Reduction/subject_03_DimReduced.rds")
+segments <- c("CP03", "PANIN03")
+
+seurat <- annotate_TLS(seurat = seurat, anno_dir = anno_dir,
+                       segments = segments,
+                       figure_dir = figure_dir, show = TRUE)
+# grade the TLS types based on the lesion type in close proximity
+anno_files <- paste0(anno_dir, "/", segments, "_TLS.csv")
+anno_data <- list()
+# CP03: 1 CP_TLS
+s <- "CP03"
+anno_data[[s]] <- read.csv(anno_files[grepl(paste0(s, "_TLS.csv$"), anno_files)])
+anno_data[[s]][["Barcode"]] <- paste0(anno_data[[s]][["Barcode"]], "_", s)
+anno_data[[s]][["TLS_lesion"]] <- 
+  plyr::mapvalues(
+    x = anno_data[[s]][["TLS"]],
+    from = c("TLS_1"),
+    to = c("CP_TLS")
+  )
+# PANIN03: 1 PanIN_TLS
+s <- "PANIN03"
+anno_data[[s]] <- read.csv(anno_files[grepl(paste0(s, "_TLS.csv$"), anno_files)])
+anno_data[[s]][["Barcode"]] <- paste0(anno_data[[s]][["Barcode"]], "_", s)
+anno_data[[s]][["TLS_lesion"]] <- 
+  plyr::mapvalues(
+    x = anno_data[[s]][["TLS"]],
+    from = c("TLS_1"),
+    to = c("PanIN_TLS")
+  )
+anno_df <- bind_rows(anno_data)
+lesion_anno <- plyr::mapvalues(
+  x = colnames(seurat),
+  from = anno_df[["Barcode"]],
+  to = anno_df[["TLS_lesion"]]
+)
+lesion_anno[!grepl("TLS$", lesion_anno)] <- NA
+seurat$TLS_lesion <- lesion_anno
+
+saveRDS(seurat,
+        file = paste0(result_dir, "/subject_03_TLS_annotation.rds"))
+rm(seurat)
+```
+
+```{r Subject 04}
+seurat <- readRDS("processed_data/07_Per_Patient_Dim_Reduction/subject_04_DimReduced.rds")
+segments <- c("CP04", "PANIN04")
+seurat <- annotate_TLS(seurat = seurat, anno_dir = anno_dir,
+                       segments = segments,
+                       figure_dir = figure_dir, show = TRUE)
+# grade the TLS types based on the lesion type in close proximity
+anno_files <- paste0(anno_dir, "/", segments, "_TLS.csv")
+anno_data <- list()
+# CP04: 1 PDAC_TLS, 2 CP_TLS
+s <- "CP04"
+anno_data[[s]] <- read.csv(anno_files[grepl(paste0(s, "_TLS.csv$"), anno_files)])
+anno_data[[s]][["Barcode"]] <- paste0(anno_data[[s]][["Barcode"]], "_", s)
+anno_data[[s]][["TLS_lesion"]] <- 
+  plyr::mapvalues(
+    x = anno_data[[s]][["TLS"]],
+    from = c("TLS_1", "TLS_2", "TLS_3"),
+    to = c("PDAC_TLS", "CP_TLS", "CP_TLS")
+  )
+# PANIN04: 1 PanIN_TLS
+s <- "PANIN04"
+anno_data[[s]] <- read.csv(anno_files[grepl(paste0(s, "_TLS.csv$"), anno_files)])
+anno_data[[s]][["Barcode"]] <- paste0(anno_data[[s]][["Barcode"]], "_", s)
+anno_data[[s]][["TLS_lesion"]] <- 
+  plyr::mapvalues(
+    x = anno_data[[s]][["TLS"]],
+    from = c("TLS_1"),
+    to = c("PanIN_TLS")
+  )
+anno_df <- bind_rows(anno_data)
+lesion_anno <- plyr::mapvalues(
+  x = colnames(seurat),
+  from = anno_df[["Barcode"]],
+  to = anno_df[["TLS_lesion"]]
+)
+lesion_anno[!grepl("TLS$", lesion_anno)] <- NA
+seurat$TLS_lesion <- lesion_anno
+
+saveRDS(seurat,
+        file = paste0(result_dir, "/subject_04_TLS_annotation.rds"))
+rm(seurat)
+```
+
+```{r Subject 05}
+seurat <- readRDS("processed_data/07_Per_Patient_Dim_Reduction/subject_05_DimReduced.rds")
+segments <- c("CP05A", "NRL05", "PDAC05")
+seurat <- annotate_TLS(seurat = seurat, anno_dir = anno_dir,
+                       segments = segments,
+                       figure_dir = figure_dir, show = TRUE)
+# grade the TLS types based on the lesion type in close proximity
+anno_files <- paste0(anno_dir, "/", segments, "_TLS.csv")
+anno_data <- list()
+# CP05A: 1 PDAC_TLS
+s <- "CP05A"
+anno_data[[s]] <- read.csv(anno_files[grepl(paste0(s, "_TLS.csv$"), anno_files)])
+anno_data[[s]][["Barcode"]] <- paste0(anno_data[[s]][["Barcode"]], "_", s)
+anno_data[[s]][["TLS_lesion"]] <- 
+  plyr::mapvalues(
+    x = anno_data[[s]][["TLS"]],
+    from = c("TLS_1"),
+    to = c("PDAC_TLS")
+  )
+# NRL05: 3 PDAC_TLS
+s <- "NRL05"
+anno_data[[s]] <- read.csv(anno_files[grepl(paste0(s, "_TLS.csv$"), anno_files)])
+anno_data[[s]][["Barcode"]] <- paste0(anno_data[[s]][["Barcode"]], "_", s)
+anno_data[[s]][["TLS_lesion"]] <- 
+  plyr::mapvalues(
+    x = anno_data[[s]][["TLS"]],
+    from = c("TLS_2", "TLS_3", "TLS_4"),
+    to = c("PDAC_TLS", "PDAC_TLS", "PDAC_TLS")
+  )
+# PDAC05: 2 PDAC_TLS
+s <- "PDAC05"
+anno_data[[s]] <- read.csv(anno_files[grepl(paste0(s, "_TLS.csv$"), anno_files)])
+anno_data[[s]][["Barcode"]] <- paste0(anno_data[[s]][["Barcode"]], "_", s)
+anno_data[[s]][["TLS_lesion"]] <- 
+  plyr::mapvalues(
+    x = anno_data[[s]][["TLS"]],
+    from = c("TLS_1", "TLS_2"),
+    to = c("PDAC_TLS", "PDAC_TLS")
+  )
+
+
+anno_df <- bind_rows(anno_data)
+lesion_anno <- plyr::mapvalues(
+  x = colnames(seurat),
+  from = anno_df[["Barcode"]],
+  to = anno_df[["TLS_lesion"]]
+)
+lesion_anno[!grepl("TLS$", lesion_anno)] <- NA
+seurat$TLS_lesion <- lesion_anno
+
+saveRDS(seurat,
+        file = paste0(result_dir, "/subject_05_TLS_annotation.rds"))
+rm(seurat)
+```

@@ -1,0 +1,502 @@
+---
+title: "19_Pattern_Markers_Analysis"
+author: "Jacob Mitchell"
+date: "2023-06-13"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r load packages}
+library(Seurat)
+library(CoGAPS)
+library(mixtools)
+library(tidyverse)
+library(decoupleR)
+library(msigdbr)
+library(fgsea)
+library(stringr)
+library(ggplot2)
+library(ComplexHeatmap)
+library(scales)
+
+set.seed(123)
+sessionInfo()
+```
+
+```{r Novel PatternMarker Statistic}
+# developed by Atul Deshpande
+newPatternMarkers <- function(object, data = NULL, fdrThresh = 5e-2, cutoff = 0.2, sanityCheck = c("correlation","ratio"))
+{
+  patternList <- colnames(object@featureLoadings)
+  N <- length(patternList)
+  geneList <- rownames(object@featureLoadings)
+  
+  if (is.null(fdrThresh)) fdrThresh <- 1/length(geneList)
+  
+  ## get total gene expression in each pattern
+  totalGeneExprFromPattern <- object@featureLoadings %*% diag(colSums(object@sampleFactors))
+  rownames(totalGeneExprFromPattern) <- geneList
+  colnames(totalGeneExprFromPattern) <- patternList
+  
+  ## total gene expression in the cogaps approximate A*P
+  totalGeneExprfromCoGAPS <- apply(totalGeneExprFromPattern,1,sum)
+  markerGenes <- geneList
+  if (!is.null(data)){
+    data <- as.matrix(data)
+    if (sanityCheck=="ratio"){
+        totalGeneExprData <- apply(data[markerGenes,],1,sum)  
+        niceGenes <- names(which(abs(totalGeneExprfromCoGAPS/totalGeneExprData-1) < cutoff))
+    }  else if (sanityCheck=="correlation"){
+        cogapsMat <- object@featureLoadings %*% t(object@sampleFactors)  
+        exprCorrelation <- sapply(rownames(cogapsMat),function(i) cor(cogapsMat[i,],data[i,]))
+        niceGenes <- names(which(exprCorrelation > cutoff))
+    }
+    markerGenes <- niceGenes
+  }
+  
+  
+  ## calculate marker scores as fraction of gene expression in each pattern
+  markerScores <- totalGeneExprFromPattern[markerGenes,]/totalGeneExprfromCoGAPS[markerGenes]
+
+  ## use mixtools to group genes into three groups - low, mid and high expression
+  mixGeneExpr <- mixtools::normalmixEM(totalGeneExprfromCoGAPS[markerGenes],lambda = c(0.3,0.6,0.1),mu = c(1,50,500), sigma = c(10,50,500))
+  exprLevels<- apply(mixGeneExpr$posterior,1,which.max)
+  names(exprLevels) <- markerGenes
+  
+  ## find mixtures of three distributions of the fractional expression for each expression level
+  ## low expression
+  lowMix <- mixtools::normalmixEM(markerScores[which(exprLevels==1),],lambda = c(0.6,0.3,0.1),mean.constr = c(0,1/length(patternList),NA), sigma = c(.1/N,.5/N,.3))
+  lowScores <- matrix(lowMix$posterior[,3], nrow = sum(exprLevels==1))
+  rownames(lowScores) <- names(which(exprLevels==1))
+  ## mid expression
+  midMix <- mixtools::normalmixEM(markerScores[which(exprLevels==2),],lambda = c(0.6,0.3,0.1),mean.constr = c(0,1/length(patternList),NA), sigma = c(.1/N,.5/N,.3))
+  midScores <- matrix(midMix$posterior[,3], nrow = sum(exprLevels==2))
+  rownames(midScores) <- names(which(exprLevels==2))
+  ## high expression
+  highMix <- mixtools::normalmixEM(markerScores[which(exprLevels==3),],lambda = c(0.6,0.3,0.1),mean.constr = c(0,1/N,NA), sigma = c(.1/N,.5/N,.3))
+  highScores <- matrix(highMix$posterior[,3], nrow = sum(exprLevels==3))
+  rownames(highScores) <- names(which(exprLevels==3))
+
+  mixScores <- rbind(lowScores,midScores,highScores)
+  colnames(mixScores) <- patternList
+  
+  ## calculate outlier threshold for each expression level
+  means <- c(lowMix$mu[2],midMix$mu[2],highMix$mu[2])
+  means <- means[exprLevels]
+  stds <- c(lowMix$sigma[2],midMix$sigma[2],highMix$sigma[2])
+  stds <- stds[exprLevels]
+  score_minus_means <- markerScores - means
+  zscores <- score_minus_means/stds
+  pVals <- 1-pnorm(zscores)
+  qVals <- qvalue::qvalue(pVals, pi0 = 1)
+  qVals <- qVals$qvalues
+  thresholds <- c(lowMix$mu[2]+3*lowMix$sigma[2],midMix$mu[2]+3*midMix$sigma[2],highMix$mu[2]+3*highMix$sigma[2])
+  markerThresholds <- thresholds[exprLevels]
+  
+  ## assign markers to patterns
+  #markersByPattern <- lapply(patternList,function(pattern) names(which(markerScores[,pattern]>markerThresholds)))
+  markersByPattern <- lapply(patternList,function(pattern) names(which(qVals[,pattern]<fdrThresh)))
+  names(markersByPattern) <- patternList    
+  
+  ## order by markerScores
+  #markersByPattern <- lapply(names(markersByPattern),function(pattern) markersByPattern[[pattern]][order(markerScores[markersByPattern[[pattern]],pattern],decreasing = T)])
+  ## order by qValues
+  markersByPattern <- lapply(names(markersByPattern),function(pattern) markersByPattern[[pattern]][order(qVals[markersByPattern[[pattern]],pattern])])
+  names(markersByPattern) <- patternList    
+  
+  return(list(
+    "PatternMarkers"=markersByPattern,
+    "PatternMarkerScores"=markerScores,
+    "PatternMixScores"=mixScores,
+    "markerExprLevels"=exprLevels
+  ))
+}
+```
+
+```{r Load gene sets}
+hallmark_gene_sets <- 
+  msigdbr(
+    species = "Homo sapiens",
+    category = "H")
+hallmark_list <- split(x = hallmark_gene_sets$gene_symbol,
+                       f = hallmark_gene_sets$gs_name)
+gomf_gene_sets <-
+  msigdbr(
+    species = "Homo sapiens",
+    category = "C5",
+    subcategory = "GO:MF")
+gomf_list <- split(x = gomf_gene_sets$gene_symbol,
+                   f = gomf_gene_sets$gs_name)
+kegg_gene_sets <-
+  msigdbr(
+    species = "Homo sapiens",
+    category = "C2",
+    subcategory = "CP:KEGG")
+kegg_list <- split(x = kegg_gene_sets$gene_symbol,
+                   f = kegg_gene_sets$gs_name)
+
+plot_gsea_waterfall <- function(gsea_res, title, show = TRUE,
+                                p.threshold = 0.05){
+  # order pathways as a factor by p-value
+  res <- gsea_res[gsea_res$padj < p.threshold,] %>% 
+    mutate("neg_log_padj" = -log10(padj))
+  res$pathway <- reorder(res$pathway, -res$padj)
+    
+  
+  p <- ggplot(res, aes(x = pathway, y = neg_log_padj, fill = pathway)) +
+    geom_col() +
+    geom_hline(yintercept = -log10(0.05), color = "#000000", linetype = 3) +
+    labs(x = "Gene Set", y = bquote("-log"["10"]*"(FDR-adj pval)"), title = title) +
+    coord_flip() +
+    theme(axis.text.y = element_text(size = 5), legend.position = "none",
+          panel.background = element_blank(),
+          panel.grid.major = element_blank(), panel.grid.minor = element_blank())
+  if(show){print(p)}
+  return(p)
+}
+
+plot_gsea_dotplot <- function(gsea_res, title, show = TRUE,
+                                p.threshold = 0.05){
+  # order pathways as a factor by p-value
+  res <- gsea_res[gsea_res$padj < p.threshold,] %>% 
+    mutate("neg_log_padj" = -log10(padj))
+  res$pathway <- reorder(res$pathway, -res$padj)
+  p <- ggplot(res, aes(x = pathway, y = neg_log_padj, color = NES)) +
+    geom_point(aes(size = .data[["size"]])) +
+    labs(x = "Gene Set", y = bquote("-log"["10"]*"(FDR-adj pval)"), title = title) +
+    coord_flip() +
+    theme(axis.text.y = element_text(size = 5), legend.position = "right",
+          panel.grid.minor = element_blank()) +
+    guides(color = guide_legend(title = "Normalized\nEnrichment\nScore"), 
+           size = guide_legend(title = "Gene Set\nSize"))
+  if(show){print(p)}
+  return(p)
+}
+# plot_gsea_dotplot(gsea_res = gsea_kegg, title = "KEGG")
+```
+
+```{r create directories}
+result_dir <- "processed_data/19_Pattern_Markers_Analysis"
+if(!dir.exists(result_dir)){
+  dir.create(result_dir)
+}
+
+figure_dir <- "figures/19_Pattern_Markers_Analysis"
+if(!dir.exists(figure_dir)){
+  dir.create(figure_dir)
+}
+```
+
+```{r load expression data and cogaps results}
+seurat <- readRDS("processed_data/15_A_Picking_Neighbor_Spots/all_segments_adjacent_spots.rds")
+cogaps <- readRDS("processed_data/16_B_10_Pattern_TLS_CoGAPS/cogaps_result_10_patterns.rds")
+```
+
+```{r Pattern marker analysis}
+pm <- newPatternMarkers(cogaps)
+patterns <- colnames(cogaps@sampleFactors)
+
+# save pattern markers list
+pm_df <- data.frame(lapply(pm$PatternMarkers, "length<-",
+                           max(lengths(pm$PatternMarkers))))
+write.csv(pm_df,
+          file = paste0(result_dir, "/n10_patterns_NewPatternMarkers.csv"),
+          na = "")
+saveRDS(pm, file = paste0(result_dir, "/n10_patterns_NewPatternMarkers.rds"))
+
+for(p in patterns){
+  markers <- pm$PatternMarkers[[p]]
+  pm_scores <- pm$PatternMarkerScores[, c(p)]
+  
+  gsea_hall <- fgsea(pathways = hallmark_list, stats = pm_scores, scoreType = "pos") %>% 
+    mutate(leadingEdge = sapply(leadingEdge, toString))
+  gsea_gomf <- fgsea(pathways = gomf_list, stats = pm_scores, scoreType = "pos") %>% 
+    mutate(leadingEdge = sapply(leadingEdge, toString))
+  gsea_kegg <- fgsea(pathways = kegg_list, stats = pm_scores, scoreType = "pos") %>% 
+    mutate(leadingEdge = sapply(leadingEdge, toString))
+  
+  # save results tables
+  write.csv(gsea_hall, file = paste0(result_dir, "/gsea_HALLMARK_", p, ".csv"))
+  write.csv(gsea_gomf, file = paste0(result_dir, "/gsea_GOMF_", p, ".csv"))
+  write.csv(gsea_kegg, file = paste0(result_dir, "/gsea_KEGG_", p, ".csv"))
+  
+  # render waterfall plot of pathways
+  p_hall <- plot_gsea_waterfall(gsea_hall, title = paste0(p, ": ", "HALLMARK Gene Set Enrichment"))
+  ggsave(plot = p_hall, filename = paste0(figure_dir, "/gsea_HALLMARK_", p, "_signif.pdf"),
+         width = unit(8, "in"), height = unit(6, "in"), dpi = 300)
+  p_gomf <- plot_gsea_waterfall(gsea_gomf, title = paste0(p, ": ", "G.O. Molecular Function Gene Set Enrichment"))
+  ggsave(plot = p_gomf, filename = paste0(figure_dir, "/gsea_GOMF_", p, "_signif.pdf"),
+         width = unit(8, "in"), height = unit(6, "in"), dpi = 300)
+  p_kegg <- plot_gsea_waterfall(gsea_kegg, title = paste0(p, ": ", "KEGG Gene Set Enrichment"))
+  ggsave(plot = p_kegg, filename = paste0(figure_dir, "/gsea_KEGG_", p, "_signif.pdf"),
+         width = unit(8, "in"), height = unit(6, "in"), dpi = 300)
+  p_kegg_dot <- plot_gsea_dotplot(gsea_kegg, title = paste0(p, ": ", "KEGG Gene Set Enrichment"))
+  ggsave(plot = p_kegg_dot, filename = paste0(figure_dir, "/gsea_KEGG_", p, "_dotplot.pdf"),
+         width = unit(6, "in"), height = unit(6, "in"), dpi = 300)
+}
+```
+
+```{r SCENIC plots}
+auc <- read.csv("processed_data/18_B_TLS_SCENIC/auc_TLS_neighbors.csv")
+colnames(auc) <- gsub("\\.\\.\\.", "_AUCell", colnames(auc))
+regulons <- read.csv("processed_data/18_B_TLS_SCENIC/regulons_TLS_neighbors.csv",
+                     skip = 2)
+regulon_colnames <- c("TF", "MotifID", "AUC", "NES", "MotifSimilarityQvalue", "OrthologousIdentity", "Annotation", "Context", "TargetGenes", "RankAtMax")
+colnames(regulons) <- regulon_colnames
+
+# append TF scores and CoGAPS weights to seurat data
+TF_scores <- colnames(auc)[grepl("_AUCell$", colnames(auc))]
+TLS_meta <- merge(auc, cogaps@sampleFactors, by.x = "Cell", by.y = "row.names", all = TRUE)
+meta_merge <- merge(seurat@meta.data, TLS_meta, by.x = "row.names", by.y = "Cell", all = TRUE)
+rownames(meta_merge) <- meta_merge$Row.names
+
+meta_merge <- meta_merge[colnames(seurat),]
+seurat@meta.data <- cbind(seurat@meta.data, meta_merge[,grepl("_AUCell$|^Pattern_", colnames(meta_merge))])
+
+# Important TFs for plotting
+tf_highlight <- c("ETS1_AUCell", "PAX5_AUCell", "NFKB2_AUCell", "FOXP3_AUCell", "GATA3_AUCell", "TBX21_AUCell", "STAT3_AUCell")
+# Calculate correlations of CoGAPS patterns with TF AUCell scores
+TF_cogaps_corr <- NULL
+for(p in patterns){
+  p_corr <- c()
+  for(tf in TF_scores){
+    cor_res <- cor(x = TLS_meta[[p]], y = TLS_meta[[tf]], method = "pearson")
+    p_corr <- c(p_corr, cor_res)
+  }
+  names(p_corr) <- TF_scores
+  TF_cogaps_corr <- cbind(TF_cogaps_corr, p_corr)
+}
+colnames(TF_cogaps_corr) <- patterns
+# save correlation results
+write.csv(TF_cogaps_corr, file = paste0(result_dir, "/Correlation_TFAUCell_CoGAPS.csv"))
+
+# top 20 TFs correlated with Pattern_1
+tf_pat1_hicor <- TF_cogaps_corr %>% as.data.frame() %>% arrange(-Pattern_1) %>% 
+  rownames() %>% .[1:20]
+
+# save spatial plots of important TFs
+for(tf in unique(tf_highlight, tf_pat1_hicor)){
+  print(tf)
+  p <- SpatialFeaturePlot(seurat, images = "PANIN01", features = tf, pt.size.factor = 2) +
+    scale_fill_gradientn(colors = viridis_pal(option = "G")(30))
+  ggsave(plot = p,
+         filename = paste0(figure_dir, "/spatial_feature_", tf, "_" , "PANIN01", ".pdf"),
+         width = unit(6, "in"), height = unit(6, "in"))
+}
+for(pat in patterns){
+  p <- SpatialFeaturePlot(seurat, images = "PANIN01", features = pat, pt.size.factor = 2) +
+    scale_fill_gradientn(colors = viridis_pal(option = "D")(30))
+  ggsave(plot = p,
+         filename = paste0(figure_dir, "/spatial_feature_", pat, "_" , "PANIN01", ".png"),
+         width = unit(6, "in"), height = unit(6, "in"))
+}
+
+# Important features that distinguish PANIN and PDAC TLSs
+TLS_dif_features <- c("CXCL13", "CCL19", "CCL21", "CR2", "LTB")
+
+# log-fold changes of compared gene sets
+de_TLS_feat <- FindMarkers(seurat, group.by = "TLS_lesion",
+                           ident.1 = "PDAC_TLS", ident.2 = "PanIN_TLS",
+                           features = TLS_dif_features, test.use = "MAST")
+de_unguided_TLS_feat <- FindMarkers(seurat, group.by = "TLS_lesion", 
+                                    ident.1 = "PDAC_TLS", ident.2 = "PanIN_TLS",
+                                    test.use = "MAST")
+de_TLSneig <- FindMarkers(seurat, group.by = "TLS_neighbors_2",
+                          ident.1 = "TLS", ident.2 = "TLS_neighbor",
+                          features = TLS_dif_features, test.use = "MAST")
+seurat$TLS_neighbors_2[is.na(seurat$TLS_neighbors_2)] <- "non-TLS"
+de_TLSnon <- FindMarkers(seurat, group.by = "TLS_neighbors_2",
+                         ident.1 = "TLS", ident.2 = "non-TLS",
+                         features = TLS_dif_features, test.use = "MAST")
+# save results
+write.csv(de_TLS_feat, file = paste0(result_dir, "/DE_TLS_lesion_limited_features.csv"))
+write.csv(de_unguided_TLS_feat, file = paste0(result_dir, "/DE_TLS_lesion.csv"))
+write.csv(de_TLSneig, file = paste0(result_dir, "/DE_TLS_neighbors_2_TLSneigh_limited_features.csv"))
+write.csv(de_TLSnon, file = paste0(result_dir, "/DE_TLS_neighbors_2_TLSnon_limited_features.csv"))
+```
+
+```{r Pattern Marker Enrichment in TF Regulons}
+# parse gene names from target gene lists
+# all gene names are flanked by apostrophies
+TF_regulons <- list()
+for(i in 1:length(regulons$TF)){
+  tf <- regulons$TF[i]
+  reg_vec <- str_split(regulons[i, c("TargetGenes")], "\\)\\, \\(")
+  TF_regulons[[tf]] <- sapply(reg_vec, function(x){gsub(".*\\'(.+)\\'.*", "\\1", x)})
+}
+
+search_regulons <- function(regulon_list, geneset){
+  regulon_overlap <- list()
+  for(i in 1:length(regulon_list)){
+    tf <- names(regulon_list)[i]
+    regulon_overlap[[tf]] <- regulon_list[[tf]][regulon_list[[tf]] %in% geneset]
+  }
+  regulon_df <- data.frame(
+    "transcription_factor" = names(regulon_list)
+  )
+  regulon_df$regulon <- sapply(regulon_list, function(x){paste(x, collapse = ", ")})
+  regulon_df$regulon_size <- sapply(regulon_list, length)
+  regulon_df$geneset_overlap <- 
+    sapply(regulon_overlap, function(x){paste(x, collapse = ", ")})
+  regulon_df$overlap_proportion <- 
+    sapply(regulon_overlap, function(x){length(x)})/regulon_df$regulon_size
+  regulon_df$transcription_factor <-
+    factor(regulon_df$transcription_factor,
+           levels = regulon_df[order(regulon_df$overlap_proportion),]$transcription_factor)
+  return(regulon_df)
+}
+
+# identify regulons that have a pattern 1 marker in them
+p1_markers <- pm$PatternMarkers$Pattern_1
+p1_scenic_overlap <- search_regulons(TF_regulons, geneset = p1_markers)
+
+plot_regulon_overlap <- function(regulon_overlap){
+  pl <- ggplot(regulon_overlap, 
+               aes(x = transcription_factor, y = overlap_proportion, 
+                   size = regulon_size)) +
+  geom_point() +
+  theme(axis.text.x = element_text(hjust = 1, vjust = 1, angle = 30))
+  return(pl)
+}
+
+plot_regulon_overlap(p1_scenic_overlap)
+plot_regulon_overlap(p1_scenic_overlap[p1_scenic_overlap$overlap_proportion > 0.5,])
+
+# limit to transcription factors with at least 5 genes in the regulon
+plot_regulon_overlap(p1_scenic_overlap[p1_scenic_overlap$overlap_proportion > 0.5 &
+                                         p1_scenic_overlap$regulon_size >= 5,])
+
+# Assess regulon occupancy of pattern markers with Dorothea regulons
+# using only genes annotated as activated by the TF (mor > 0)
+# limiting to high-confidence A rating
+net <- get_dorothea(organism='human')
+net_A <- net[net$confidence == "A" & net$mor > 0,]
+net_ABC <- net[net$confidence %in% c("A", "B", "C") & net$mor > 0,]
+dorothea_regulons <- list()
+for(tf in unique(net_A$source)){
+  reg_df <- net_A[net_A$source == tf,]
+  targets <- reg_df$target
+  dorothea_regulons[[tf]] <- targets
+}
+dorothea_ABC_regulons <- list()
+for(tf in unique(net_A$source)){
+  reg_df <- net_ABC[net_ABC$source == tf,]
+  targets <- reg_df$target
+  dorothea_ABC_regulons[[tf]] <- targets
+}
+
+p1_dorothea_overlap <- search_regulons(dorothea_regulons, geneset = p1_markers)
+plot_regulon_overlap(p1_dorothea_overlap)
+plot_regulon_overlap(p1_dorothea_overlap[p1_dorothea_overlap$overlap_proportion > 0.5 &
+                                         p1_dorothea_overlap$regulon_size >= 3,])
+
+# overrepresentation analysis of pattern markers
+dorothea_fora <- fora(dorothea_regulons, genes = p1_markers, 
+                      universe = rownames(seurat)) %>% 
+    mutate(overlapGenes = sapply(overlapGenes, toString))
+
+# gsea of TF regulons using ranked pattern marker scores
+dorothea_gsea <- fgsea(pathways = dorothea_regulons, 
+                       stats = pm$PatternMarkerScores[, c("Pattern_1")], 
+                       scoreType = "pos") %>% 
+    mutate(leadingEdge = sapply(leadingEdge, toString))
+
+for(p in patterns){
+  markers <- pm$PatternMarkers[[p]]
+  scenic_overlap <- search_regulons(TF_regulons, geneset = markers)
+  write.csv(scenic_overlap, file = paste0(result_dir, "/regulon_overlap_", p, "_SCENIC.csv"))
+  dorothea_overlap <- search_regulons(dorothea_regulons, geneset = markers)
+  write.csv(dorothea_overlap, file = paste0(result_dir, "/regulon_overlap_", p, "_Dorothea.csv"))
+  # plot overlap scores overall and limited to proportion >=0.5 with regulons of at least 3 genes
+  pl_scenic_overlap <- plot_regulon_overlap(scenic_overlap)
+  ggsave(pl_scenic_overlap, 
+         file = paste0(figure_dir, "/regulon_overlap_", p, "_",
+                       "SCENIC",
+                       ".pdf"),
+         width = unit(8, "in"), height = unit(6, "in"))
+  pl_scenic_overlap_top <- 
+    plot_regulon_overlap(scenic_overlap[scenic_overlap$overlap_proportion > 0.5 &
+                                          scenic_overlap$regulon_size >= 3,])
+  ggsave(pl_scenic_overlap_top, 
+         file = paste0(figure_dir, "/regulon_overlap_", p, "_",
+                       "SCENIC", "_top",
+                       ".pdf"),
+         width = unit(8, "in"), height = unit(6, "in"))
+  pl_dorothea_overlap <- plot_regulon_overlap(dorothea_overlap)
+  ggsave(pl_dorothea_overlap, 
+         file = paste0(figure_dir, "/regulon_overlap_", p, "_",
+                       "Dorothea",
+                       ".pdf"),
+         width = unit(8, "in"), height = unit(6, "in"))
+  pl_dorothea_overlap_top <- 
+    plot_regulon_overlap(dorothea_overlap[dorothea_overlap$overlap_proportion > 0.5 &
+                                          dorothea_overlap$regulon_size >= 3,])
+  ggsave(pl_dorothea_overlap_top, 
+         file = paste0(figure_dir, "/regulon_overlap_", p, "_",
+                       "Dorothea", "_top",
+                       ".pdf"),
+         width = unit(8, "in"), height = unit(6, "in"))
+  
+  # ORA and Gene set enrichment
+  dorothea_fora <- fora(dorothea_regulons, genes = markers, 
+                      universe = rownames(seurat)) %>% 
+    mutate(overlapGenes = sapply(overlapGenes, toString))
+  write.csv(dorothea_fora, file = paste0(result_dir, "/ORA_", p, "_Dorothea.csv"))
+  pl_dorothea_fora <- 
+    plot_gsea_waterfall(dorothea_fora,  
+                        p.threshold = 0.5,
+                        title = paste0(p, ": Overrepresented pattern markers\n in DoRothEA TF regulons"))
+  ggsave(pl_dorothea_fora, 
+         file = paste0(figure_dir, "/ORA_", p, "_","Dorothea",".pdf"),
+         width = unit(8, "in"), height = unit(6, "in"))
+  dorothea_gsea <- fgsea(pathways = dorothea_regulons, 
+                         stats = pm$PatternMarkerScores[, c(p)], 
+                         scoreType = "pos") %>% 
+    mutate(leadingEdge = sapply(leadingEdge, toString))
+  write.csv(dorothea_gsea, file = paste0(result_dir, "/GSEA_", p, "_Dorothea.csv"))
+  pl_dorothea_gsea <- 
+    plot_gsea_waterfall(dorothea_gsea,  
+                        p.threshold = 0.5,
+                        title = paste0(p, ": GSEA pattern marker scores\n in DoRothEA TF regulons"))
+  ggsave(pl_dorothea_gsea, 
+         file = paste0(figure_dir, "/GSEA_", p, "_","Dorothea",".pdf"),
+         width = unit(8, "in"), height = unit(6, "in"))
+  pl_dorothea_gsea_signif <- 
+    plot_gsea_waterfall(dorothea_gsea,  
+                        p.threshold = 0.05,
+                        title = paste0(p, ": GSEA pattern marker scores\n in DoRothEA TF regulons"))
+  ggsave(pl_dorothea_gsea_signif, 
+         file = paste0(figure_dir, "/GSEA_", p, "_","Dorothea_significant",".pdf"),
+         width = unit(8, "in"), height = unit(6, "in"))
+  # significant pathways as a dotplot
+  pl_dorothea_gsea_dot <- 
+    plot_gsea_dotplot(dorothea_gsea,  
+                      p.threshold = 0.05, 
+                      title = paste0(p, ": GSEA pattern marker scores\n in DoRothEA TF regulons"))
+  ggsave(pl_dorothea_gsea_dot, 
+         file = paste0(figure_dir, "/GSEA_", p, "_","Dorothea_dotplot",".pdf"),
+         width = unit(6, "in"), height = unit(6, "in"))
+  
+  dorothea_ABC_gsea <- fgsea(pathways = dorothea_ABC_regulons, 
+                         stats = pm$PatternMarkerScores[, c(p)], 
+                         scoreType = "pos") %>% 
+    mutate(leadingEdge = sapply(leadingEdge, toString))
+  write.csv(dorothea_ABC_gsea, file = paste0(result_dir, "/GSEA_", p, "_Dorothea_ABC.csv"))
+  pl_dorothea_ABC_gsea <- 
+    plot_gsea_waterfall(dorothea_ABC_gsea,  
+                        p.threshold = 0.5,
+                        title = paste0(p, ": GSEA pattern marker scores\n in DoRothEA TF regulons (confidence ABC)"))
+  ggsave(pl_dorothea_ABC_gsea, 
+         file = paste0(figure_dir, "/GSEA_", p, "_","Dorothea_ABC",".pdf"),
+         width = unit(8, "in"), height = unit(6, "in"))
+}
+
+```
+
+
+

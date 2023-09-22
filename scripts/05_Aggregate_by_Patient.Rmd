@@ -1,0 +1,315 @@
+---
+title: "05_Aggregate_by_Patient"
+author: "Jacob Mitchell"
+date: "2022-12-19"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r Load Packages}
+library(Seurat)
+library(ggplot2)
+
+sessionInfo()
+```
+
+```{r Data Directory to Load From}
+data_dir <- "processed_data/04_Pathologist_Annotations"
+```
+
+```{r Create Results Directories}
+result_dir <- "processed_data/05_Aggregate_by_Patient"
+if(!dir.exists(result_dir)){
+  dir.create(result_dir)
+}
+
+figure_dir <- "figures/05_Aggregate_by_Patient"
+if(!dir.exists(figure_dir)){
+  dir.create(figure_dir)
+}
+```
+
+```{r Patient 01: Aggregate}
+segments <- c("CP01", "NRL01", "PANIN01", "PDAC01")
+segment_filenames <- paste0(data_dir, "/", 
+                            segments, "_pathology_corrected_annotation.rds")
+
+# read in seurat objects
+cp01 <- readRDS(paste0(segment_filenames[1]))
+nrl01 <- readRDS(paste0(segment_filenames[2]))
+panin01 <- readRDS(paste0(segment_filenames[3]))
+pdac01 <- readRDS(paste0(segment_filenames[4]))
+
+# Add annotations of segment name and rename the images to correspond with segments
+cp01$segment <- segments[1]
+names(cp01@images) <- segments[1]
+nrl01$segment <- segments[2]
+names(nrl01@images) <- segments[2]
+panin01$segment <- segments[3]
+names(panin01@images) <- segments[3]
+pdac01$segment <- segments[4]
+names(pdac01@images) <- segments[4]
+
+# check dimensions before merge
+print(segments[1])
+dim(cp01)
+print(segments[2])
+dim(nrl01)
+print(segments[3])
+dim(panin01)
+print(segments[4])
+dim(pdac01)
+
+# merge seurat objects across the same patient
+seurat <- merge(x = cp01, y = c(nrl01, panin01, pdac01))
+
+# dimensions of the combined object
+dim(seurat)
+colnames(seurat@meta.data)
+table(seurat$segment)
+
+# test feature plot
+print(
+  SpatialFeaturePlot(seurat,
+                     features = "INS")
+)
+
+# remove idividual segments from memory
+rm(cp01, nrl01, panin01, pdac01)
+
+# save aggregated seurat object
+saveRDS(seurat, 
+        file = paste0(result_dir, "/", "subject_01",
+                      "_aggregated_segments.rds"))
+
+# clear previous object from memory
+rm(seurat)
+```
+
+```{r Patient 02: Aggregate}
+segments <- c("NRL02", "PANIN02A", "PANIN02B", "PDAC02")
+segment_filenames <- paste0(data_dir, "/", 
+                            segments, "_pathology_corrected_annotation.rds")
+
+# read in seurat objects
+nrl02 <- readRDS(paste0(segment_filenames[1]))
+panin02a <- readRDS(paste0(segment_filenames[2]))
+panin02b <- readRDS(paste0(segment_filenames[3]))
+pdac02 <- readRDS(paste0(segment_filenames[4]))
+
+# Add annotations of segment name and rename the images to correspond with segments
+nrl02$segment <- segments[1]
+names(nrl02@images) <- segments[1]
+panin02a$segment <- segments[2]
+names(panin02a@images) <- segments[2]
+panin02b$segment <- segments[3]
+names(panin02b@images) <- segments[3]
+pdac02$segment <- segments[4]
+names(pdac02@images) <- segments[4]
+
+# check dimensions before merge
+print(segments[1])
+dim(nrl02)
+print(segments[2])
+dim(panin02a)
+print(segments[3])
+dim(panin02b)
+print(segments[4])
+dim(pdac02)
+
+# merge seurat objects across the same patient
+seurat <- merge(x = nrl02, y = c(panin02a, panin02b, pdac02))
+
+# dimensions of the combined object
+dim(seurat)
+colnames(seurat@meta.data)
+table(seurat$segment)
+
+# test feature plot
+print(
+  SpatialFeaturePlot(seurat,
+                     features = "INS")
+)
+
+# remove idividual segments from memory
+rm(nrl02, panin02a, panin02b, pdac02)
+
+# save aggregated seurat object
+saveRDS(seurat, 
+        file = paste0(result_dir, "/", "subject_02",
+                      "_aggregated_segments.rds"))
+
+# clear previous object from memory
+rm(seurat)
+```
+
+```{r Patient 03: Aggregate}
+segments <- c("CP03", "NRL03", "PANIN03", "PDAC03")
+segment_filenames <- paste0(data_dir, "/", 
+                            segments, "_pathology_corrected_annotation.rds")
+
+# read in seurat objects
+cp03 <- readRDS(paste0(segment_filenames[1]))
+nrl03 <- readRDS(paste0(segment_filenames[2]))
+panin03 <- readRDS(paste0(segment_filenames[3]))
+pdac03 <- readRDS(paste0(segment_filenames[4]))
+
+# Add annotations of segment name and rename the images to correspond with segments
+cp03$segment <- segments[1]
+names(cp03@images) <- segments[1]
+nrl03$segment <- segments[2]
+names(nrl03@images) <- segments[2]
+panin03$segment <- segments[3]
+names(panin03@images) <- segments[3]
+pdac03$segment <- segments[4]
+names(pdac03@images) <- segments[4]
+
+# check dimensions before merge
+print(segments[1])
+dim(cp03)
+print(segments[2])
+dim(nrl03)
+print(segments[3])
+dim(panin03)
+print(segments[4])
+dim(pdac03)
+
+# merge seurat objects across the same patient
+seurat <- merge(x = cp03, y = c(nrl03, panin03, pdac03))
+
+# dimensions of the combined object
+dim(seurat)
+colnames(seurat@meta.data)
+table(seurat$segment)
+
+# test feature plot
+print(
+  SpatialFeaturePlot(seurat,
+                     features = "INS")
+)
+
+# remove idividual segments from memory
+rm(cp03, nrl03, panin03, pdac03)
+
+# save aggregated seurat object
+saveRDS(seurat, 
+        file = paste0(result_dir, "/", "subject_03",
+                      "_aggregated_segments.rds"))
+
+# clear previous object from memory
+rm(seurat)
+```
+
+```{r Patient 04: Aggregate}
+# PDAC04 is excluded due to very low counts throughout the segment
+
+segments <- c("CP04", "NRL04", "PANIN04")
+segment_filenames <- paste0(data_dir, "/", 
+                            segments, "_pathology_corrected_annotation.rds")
+
+# read in seurat objects
+cp04 <- readRDS(paste0(segment_filenames[1]))
+nrl04 <- readRDS(paste0(segment_filenames[2]))
+panin04 <- readRDS(paste0(segment_filenames[3]))
+
+# Add annotations of segment name and rename the images to correspond with segments
+cp04$segment <- segments[1]
+names(cp04@images) <- segments[1]
+nrl04$segment <- segments[2]
+names(nrl04@images) <- segments[2]
+panin04$segment <- segments[3]
+names(panin04@images) <- segments[3]
+
+# check dimensions before merge
+print(segments[1])
+dim(cp04)
+print(segments[2])
+dim(nrl04)
+print(segments[3])
+dim(panin04)
+
+# merge seurat objects across the same patient
+seurat <- merge(x = cp04, y = c(nrl04, panin04))
+
+# dimensions of the combined object
+dim(seurat)
+colnames(seurat@meta.data)
+table(seurat$segment)
+
+# test feature plot
+print(
+  SpatialFeaturePlot(seurat,
+                     features = "INS")
+)
+
+# remove idividual segments from memory
+rm(cp04, nrl04, panin04)
+
+# save aggregated seurat object
+saveRDS(seurat, 
+        file = paste0(result_dir, "/", "subject_04",
+                      "_aggregated_segments.rds"))
+
+# clear previous object from memory
+rm(seurat)
+```
+
+```{r Patient 05: Aggregate}
+segments <- c("CP05A", "CP05B", "NRL05", "PDAC05")
+segment_filenames <- paste0(data_dir, "/", 
+                            segments, "_pathology_corrected_annotation.rds")
+
+# read in seurat objects
+cp05a <- readRDS(paste0(segment_filenames[1]))
+cp05b <- readRDS(paste0(segment_filenames[2]))
+nrl05 <- readRDS(paste0(segment_filenames[3]))
+pdac05 <- readRDS(paste0(segment_filenames[4]))
+
+# Add annotations of segment name and rename the images to correspond with segments
+cp05a$segment <- segments[1]
+names(cp05a@images) <- segments[1]
+cp05b$segment <- segments[2]
+names(cp05b@images) <- segments[2]
+nrl05$segment <- segments[3]
+names(nrl05@images) <- segments[3]
+pdac05$segment <- segments[4]
+names(pdac05@images) <- segments[4]
+
+# check dimensions before merge
+print(segments[1])
+dim(cp05a)
+print(segments[2])
+dim(cp05b)
+print(segments[3])
+dim(nrl05)
+print(segments[4])
+dim(pdac05)
+
+# merge seurat objects across the same patient
+seurat <- merge(x = cp05a, y = c(cp05b, nrl05, pdac05))
+
+# dimensions of the combined object
+dim(seurat)
+colnames(seurat@meta.data)
+table(seurat$segment)
+
+# test feature plot
+print(
+  SpatialFeaturePlot(seurat,
+                     features = "INS")
+)
+
+# remove idividual segments from memory
+rm(cp05a, cp05b, nrl05, pdac05)
+
+# save aggregated seurat object
+saveRDS(seurat, 
+        file = paste0(result_dir, "/", "subject_05",
+                      "_aggregated_segments.rds"))
+
+# clear previous object from memory
+rm(seurat)
+```

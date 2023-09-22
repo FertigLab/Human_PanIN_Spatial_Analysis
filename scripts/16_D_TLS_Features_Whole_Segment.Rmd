@@ -1,0 +1,347 @@
+---
+title: "16_D_TLS_Features_Whole_Segment"
+author: "Jacob Mitchell"
+date: "2023-05-08"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(Seurat)
+library(CoGAPS)
+library(dplyr)
+library(ggplot2)
+library(ComplexHeatmap)
+library(scales)
+library(colorRamps)
+library(circlize)
+library(patchwork)
+
+set.seed(123)
+sessionInfo()
+```
+
+```{r}
+result_dir <- "processed_data/16_D_TLS_Features_Whole_Segment"
+if(!dir.exists(result_dir)){
+  dir.create(result_dir)
+}
+
+figure_dir <- "figures/16_D_TLS_Features_Whole_Segment"
+if(!dir.exists(figure_dir)){
+  dir.create(figure_dir)
+}
+```
+
+```{r}
+seurat <- readRDS("processed_data/15_A_Picking_Neighbor_Spots/all_segments_adjacent_spots.rds")
+cogaps <- readRDS("processed_data/16_B_10_Pattern_TLS_CoGAPS/cogaps_result_10_patterns.rds")
+auc <- read.csv("processed_data/18_B_TLS_SCENIC/auc_TLS_neighbors.csv")
+colnames(auc) <- gsub("\\.\\.\\.", "", colnames(auc))
+colnames(auc)[-1] <- paste0(colnames(auc)[-1], "_tf.score")
+rownames(auc) <- auc$Cell
+TF_scores <- colnames(auc)[-1]
+```
+
+```{r Integrate CoGAPS results}
+# Annotate subjects for regressing out patients in differential expression
+seurat$subject_id <- gsub(".*0", "subject_0", seurat$segment)
+seurat$subject_id <- gsub("[A|B]", "", seurat$subject_id)
+
+A <- cogaps@featureLoadings
+A_df <- as.data.frame(A)
+A_df$gene <- rownames(A_df)
+
+P <- cogaps@sampleFactors
+cell_meta_data <- seurat@meta.data
+cell_meta_data$cell_barcode <- rownames(cell_meta_data)
+P_df <- as.data.frame(P)
+P_df$cell_barcode <- rownames(P_df)
+
+df <- left_join(cell_meta_data, P_df, by = "cell_barcode")
+rownames(df) <- rownames(cell_meta_data)
+
+sum(seurat$nCount_Spatial != df$nCount_Spatial)
+# 0
+
+seurat@meta.data <- df
+```
+
+```{r}
+tls_features <- c("CXCL13", "BCL6", "LTB", "CXCR5", "TGFB1", "TGFB2", "TGFB3",
+                  "CR2", 
+                  "PDCD1", "CTLA4", "LAG3", "TIGIT",
+                  # CD21 # "FCER2", # CD23 not present in seurat features
+                  "IL21", "CCL19", "CCL21",
+                  "IGHM", "IGHD", "IGHG1", "IGHA1",
+                  "FOXP3",
+                  "chemokine_module_score1",
+                  "ENTPD1")
+
+for(f in tls_features){
+  p <- SpatialFeaturePlot(seurat, features = f, images = "PANIN01",
+                          pt.size.factor = 3)
+  # print(p)
+  ggsave(plot = p,
+         filename = paste0(figure_dir, "/spatial_feature_", f, ".png"),
+         width = 6, height = 6, units = "in", dpi = 300)
+  ggsave(plot = p,
+         filename = paste0(figure_dir, "/spatial_feature_", f, ".pdf"),
+         width = unit(6, "in"), height = unit(6, "in"))
+  # violin plot of marker expression in TLS, TLS_neighbor, and non-TLS
+  
+  v <- VlnPlot(seurat, group.by = "TLS_neighbors_2", features = f) +
+    scale_x_discrete(labels = c("TLS", "TLS Neighbor", "Non-TLS")) +
+    scale_fill_manual(values = c("TLS" = "#FF0000", 
+                                 "TLS_neighbor" = "#FFFFFF",
+                                 "NA" = "#AAAAAA")) +
+    xlab("") + theme(legend.position = "none")
+  # print(v)
+  ggsave(plot = v,
+         filename = paste0(figure_dir, "/violin_feature_", f, ".png"),
+         width = 6, height = 6, units = "in", dpi = 300)
+  ggsave(plot = v,
+         filename = paste0(figure_dir, "/violin_feature_", f, ".pdf"),
+         width = unit(6, "in"), height = unit(6, "in"))
+  
+  # violin plot of marker expression in TLS regions across lesion types (CP, PanIN, PDAC)
+  vl <- VlnPlot(seurat, group.by = "TLS_lesion", features = f) +
+    scale_x_discrete(labels = c("CP_TLS", "PanIN_TLS", "PDAC_TLS", "Non-TLS")) +
+    scale_fill_manual(values = c("CP_TLS" = "#FFDD00", 
+                                 "PanIN_TLS" = "#FFA500",
+                                 "PDAC_TLS" = "#FF0000",
+                                 "NA" = "#AAAAAA")) +
+    xlab("") + theme(legend.position = "none")
+  ggsave(plot = vl,
+         filename = paste0(figure_dir, "/violin_feature_lesion_", f, ".pdf"),
+         width = unit(6, "in"), height = unit(6, "in"))
+  
+  # multipanel plot
+  if(f %in% rownames(seurat)){
+    feat_min <- min(seurat[["SCT"]]@data[c(f),])
+    feat_max <- max(seurat[["SCT"]]@data[c(f),])
+  } else {
+    feat_min <- min(seurat@meta.data[[f]])
+    feat_min <- max(seurat@meta.data[[f]])
+  }
+  
+  plot_list <- list()
+  for(i in Images(seurat)){
+    m <- SpatialFeaturePlot(seurat, features = f, crop = FALSE, 
+                                  images = i, stroke = 0) +
+      scale_fill_gradientn(limits = c(feat_min, feat_max), colors = rev(brewer_pal(palette = "Spectral")(9)))
+    plot_list[[i]] <- m
+  }
+  m_plot <- wrap_plots(plot_list, guides = "keep", ncol = 4, nrow = 5)
+  ggsave(plot = m_plot,
+         filename = paste0(figure_dir, "/multipanel_feature_", f, ".png"),
+         width = unit(12, "in"), height = unit(16, "in"))
+  ggsave(plot = m_plot,
+         filename = paste0(figure_dir, "/multipanel_feature_", f, ".pdf"),
+         width = unit(12, "in"), height = unit(16, "in"))
+}
+```
+
+```{r Differential expression between TLS grades}
+# tls_differential_expression <- function(seurat, )
+
+
+# without covariate regression
+# df <- FindMarkers(seurat, group.by = )
+  
+```
+
+
+```{r Heatmap of pattern associated genes}
+plot_heatmap <- function(seurat, geneset, 
+                         cluster_cells = TRUE,
+                         cluster_rows = TRUE,
+                         cell_order = NULL,
+                         cellAnnotation = NULL,
+                         ...){
+  # limit to unique entries, some are repeated in GOMF list
+  geneset <- unique(geneset)
+  
+  # check if plotted genes are in seurat data
+  if(sum(!geneset %in% rownames(seurat))){
+    mis_genes <- geneset[!geneset %in% rownames(seurat)]
+    warning(paste0("genes not present in seurat data: ", 
+                   paste(mis_genes, sep = "", collapse = ", ")))
+    geneset <- geneset[!geneset %in% mis_genes]
+  }
+  
+  # cell_meta <- seurat@meta.data
+  mat <- as.matrix(seurat@assays$SCT@data[geneset, colnames(seurat)])
+  # note and remove genes with 0 variance
+  row_sd <- apply(mat, 1, sd)
+  no_var <- rownames(mat)[row_sd == 0]
+  if(length(no_var)){
+    warning(paste0("genes with no variance removed: ", 
+                   paste(no_var, sep = "", collapse = ", ")))
+    mat <- mat[!rownames(mat) %in% no_var,]
+  }
+  
+  # scale the matrix
+  # transposes are necessary because scale() scales across columns
+  scaled_mat <- t(scale(t(mat)))
+  
+  if(!is.null(cell_order) & cluster_cells == FALSE){
+    scaled_mat <- scaled_mat[,cell_order]
+  }
+  
+  hmap <- Heatmap(
+    matrix = scaled_mat,
+    # col = col_fun,
+    cluster_columns = cluster_cells,
+    cluster_rows = cluster_rows,
+    show_column_dend = FALSE,
+    show_column_names = FALSE,
+    name = "expression",
+    top_annotation = cellAnnotation,
+    ...
+  )
+  plot(hmap)
+}
+
+# pattern weight heatmap across all TLS and TLS_neighbor spots
+ser_tls <- seurat[,seurat$TLS == "TLS"]
+ser_tls_meta <- ser_tls@meta.data %>% arrange(Pattern_1)
+
+segment_cols <- hue_pal()(length(unique(ser_tls$segment)))
+names(segment_cols) <- unique(ser_tls$segment)
+patient_cols <- c("subject_01" = brewer_pal(palette = "Set2")(5)[1],
+                  "subject_02" = brewer_pal(palette = "Set2")(5)[2],
+                  "subject_03" = brewer_pal(palette = "Set2")(5)[3],
+                  "subject_04" = brewer_pal(palette = "Set2")(5)[4],
+                  "subject_05" = brewer_pal(palette = "Set2")(5)[5])
+# pattern_cols <- colorRamp2(c(0,0.5,1), c("#FFFFFF", "orange", "red"))
+pattern_cols <- colorRamp2(c(0,0.5,1), viridis_pal()(3))
+cell_anno <- columnAnnotation(
+  segment = ser_tls_meta$segment,
+  patient = ser_tls_meta$subject_id,
+  Pattern_1 = ser_tls_meta$Pattern_1,
+  col = list(segment = segment_cols,
+             patient = patient_cols,
+             Pattern_1 = pattern_cols)
+)
+
+cell_anno_noLegend <- columnAnnotation(
+  segment = ser_tls_meta$segment,
+  patient = ser_tls_meta$subject_id,
+  Pattern_1 = ser_tls_meta$Pattern_1,
+  col = list(segment = segment_cols,
+             patient = patient_cols,
+             Pattern_1 = pattern_cols),
+  show_legend = c(FALSE, FALSE, FALSE)
+)
+
+pat1_order <- rownames(
+  ser_tls_meta %>%
+    arrange(Pattern_1)
+  )
+
+plot_heatmap(seurat = ser_tls, geneset = tls_features,
+             cell_order = pat1_order, cluster_cells = FALSE,
+             cellAnnotation = cell_anno)
+
+pat1_top <- rownames(
+  A_df %>% arrange(-Pattern_1)
+)[1:25]
+
+png(filename = paste0(figure_dir, "/heatmap_top25_amplitude_Pattern_1.png"),
+    width = 10, height = 6, units = "in", res = 300)
+plot_heatmap(seurat = ser_tls, geneset = pat1_top,
+             cell_order = pat1_order, 
+             cluster_cells = FALSE, cluster_rows = FALSE,
+             cellAnnotation = cell_anno)
+dev.off()
+pdf(file = paste0(figure_dir, "/heatmap_top25_amplitude_Pattern_1.pdf"),
+    width = 10, height = 6)
+plot_heatmap(seurat = ser_tls, geneset = pat1_top,
+             cell_order = pat1_order, 
+             cluster_cells = FALSE, cluster_rows = FALSE,
+             cellAnnotation = cell_anno)
+dev.off()
+
+png(filename = paste0(figure_dir, "/heatmap_top25_amplitude_Pattern_1_noLegend.png"),
+    width = 10, height = 6, units = "in", res = 300)
+plot_heatmap(seurat = ser_tls, geneset = pat1_top,
+             cell_order = pat1_order, 
+             cluster_cells = FALSE, cluster_rows = FALSE,
+             cellAnnotation = cell_anno_noLegend,
+             show_heatmap_legend = FALSE)
+dev.off()
+pdf(file = paste0(figure_dir, "/heatmap_top25_amplitude_Pattern_1_noLegend.pdf"),
+    width = 10, height = 6)
+plot_heatmap(seurat = ser_tls, geneset = pat1_top,
+             cell_order = pat1_order, 
+             cluster_cells = FALSE, cluster_rows = FALSE,
+             cellAnnotation = cell_anno_noLegend,
+             show_heatmap_legend = FALSE)
+dev.off()
+```
+
+```{r}
+# test for all transcription factors with significant association with Pattern 2
+sum(rownames(P) != rownames(auc))
+# 0
+
+nmf_auc <- as.data.frame(cbind(P, auc))
+lm_results <- NULL
+
+for(tf in TF_scores){
+  fit <- lm(Pattern_1 ~ nmf_auc[[tf]], data = nmf_auc)
+  if(is.na(fit$coefficients[2])){
+    res <- data.frame(
+      TF_score = NA,
+      beta_est = NA,
+      beta_se = NA,
+      p.val = NA
+    )
+    lm_results <- rbind(lm_results, res)
+  } else {
+    res <- data.frame(
+      TF_score = tf,
+      beta_est = summary(fit)$coefficients[2,1],
+      beta_se = summary(fit)$coefficients[2,2],
+      p.val = summary(fit)$coefficients[2,4]
+    )
+    lm_results <- rbind(lm_results, res)
+  }
+}
+lm_results$adj.p.val <- p.adjust(lm_results$p.val, method = "fdr")
+
+lm_signif <- lm_results[lm_results$beta_est > 0 & lm_results$adj.p.val < 0.05 &
+                          !is.na(lm_results$beta_est),] %>%
+  arrange(adj.p.val)
+
+png(filename = paste0(figure_dir, "/scenic_top_associations_", "Pattern_1", ".png"),
+    width = 10, height = 10, unit = "in", res = 300)
+pairs(nmf_auc[,c("Pattern_1", lm_signif$TF_score[1:6])], lower.panel = NULL)
+dev.off()
+```
+
+
+```{r}
+# Idents(seurat) <- seurat$TLS_neighbors_2
+# p <- SpatialDimPlot(seurat, pt.size.factor = 3, images = "PANIN01", alpha = 0.9) +
+#   scale_fill_manual(values = c("TLS" = "#FF0000",
+#                                "TLS_neighbor" = "#666666"),
+#                     na.value = "transparent") +
+#   theme(legend.position = "none")
+# p
+
+# SpatialFeaturePlot(seurat, features = "CXCL13", images = "PANIN01",
+#                    pt.size.factor = 3)
+# SpatialFeaturePlot(seurat, features = "Pattern_2", images = "PANIN01",
+#                    pt.size.factor = 3) +
+#   scale_fill_continuous(na.value="transparent") +
+#   theme(legend.position = "none")
+# 
+# VlnPlot(seurat, features = c("CXCL13", "CCL19", "CCL21"), group.by = "TLS")
+# VlnPlot(seurat, features = c("BCL6", "CR2", "IL21"), group.by = "TLS")
+```
+

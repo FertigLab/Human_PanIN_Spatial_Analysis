@@ -1,0 +1,72 @@
+---
+title: "18_C_CoGAPS_Association_with_TF_Activity"
+author: "Jacob Mitchell"
+date: "2023-03-28"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(Seurat)
+library(dplyr)
+library(ggplot2)
+library(CoGAPS)
+
+set.seed(123)
+sessionInfo()
+```
+
+```{r}
+result_dir <- "processed_data/18_C_CoGAPS_Association_with_TF_Activity"
+if(!dir.exists(result_dir)){
+  dir.create(result_dir)
+}
+
+figure_dir <- "figures/18_C_CoGAPS_Association_with_TF_Activity"
+if(!dir.exists(figure_dir)){
+  dir.create(figure_dir)
+}
+```
+
+```{r}
+# read seurat object of TLS and neighbor spots
+seurat <- readRDS("processed_data/15_A_Picking_Neighbor_Spots/TLS_adjacent_spots.rds")
+
+# load transcription factor activity scores quatified by pySCENIC (v.0.11.0)
+# transposed to TF x cell
+auc <- as.data.frame(t(read.csv("processed_data/18_B_TLS_SCENIC/auc_TLS_neighbors.csv",
+                                row.names = 1)))
+# remove elipses from TF names
+rownames(auc) <- gsub("\\.\\.\\.", "", rownames(auc))
+
+# CoGAPS results, n10 Patterns
+cogaps <- readRDS("processed_data/16_B_10_Pattern_TLS_CoGAPS/cogaps_result_10_patterns.rds")
+```
+
+```{r}
+# add cogaps weights to data
+cogaps_weight <- cogaps@sampleFactors
+cogaps_weight <- cogaps_weight[rownames(seurat@meta.data),]
+seurat@meta.data <- cbind(seurat@meta.data, cogaps_weight)
+
+# append TF activities as meta.data to the seurat object
+auc_cellxtf <- as.data.frame(t(auc))
+# match order of cell barcodes
+auc_cellxtf <- auc_cellxtf[rownames(seurat@meta.data),]
+# add signifier of tf.score
+colnames(auc_cellxtf) <- paste0(colnames(auc_cellxtf), "_tf")
+seurat_auc <- seurat
+seurat_auc@meta.data <- cbind(seurat_auc@meta.data, auc_cellxtf)
+
+# preview correlation of Pattern weights and auc measures
+pairs(seurat_auc@meta.data[,c("Pattern_9", "FOXP3_tf", "ETS1_tf",  "GATA5_tf", "GATA3_tf", "SOX9_tf", "SMAD1_tf")])
+pairs(seurat_auc@meta.data[,c("Pattern_9", "FOXP3_tf", "ETS1_tf",  "GATA3_tf")])
+
+SpatialFeaturePlot(seurat_auc, features = "FOXP3_tf", images = "PANIN01")
+SpatialFeaturePlot(seurat_auc, features = "ETS1_tf", images = "PANIN01")
+
+```
+

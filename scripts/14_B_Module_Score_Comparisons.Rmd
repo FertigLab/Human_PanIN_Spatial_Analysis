@@ -1,0 +1,386 @@
+---
+title: "14_B_Module_Score_Comparisons"
+author: "Jacob Mitchell"
+date: "2023-01-30"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r Load Packages}
+library(Seurat)
+library(ggplot2)
+library(ggpubr)
+library(colorRamps)
+
+sessionInfo()
+```
+
+```{r Custom Functions}
+plot_save_pdf <- function(plot, filename){
+  ggsave(plot = plot,
+         filename = paste0(filename),
+         width = unit(6, "in"), height = unit(6, "in"))
+}
+
+plot_module_score_comparison <- function(seurat, subject_name, module_score, group.by,
+                                         comparisons,
+                                         show = TRUE, figure_path = NULL){
+  cell_meta_data <- seurat@meta.data
+  matlab_pal <- colorRamps::matlab.like2(length(unique(cell_meta_data[[group.by]])))
+  viol <- ggplot(data = cell_meta_data, aes(x = .data[[group.by]],
+                                            y = .data[[module_score]],
+                                            fill = .data[[group.by]])) +
+    geom_jitter(size = 0.5, color = "#000000", width = 0.05) +
+    geom_violin(alpha = 0.6) +
+    stat_compare_means(comparisons = comparisons, method = "wilcox.test") +
+    scale_fill_manual(values = matlab_pal) +
+    ggtitle(label = paste0(subject_name, " : ", module_score)) +
+    theme_bw()
+  if(show){ print(viol) }
+  if(!is.null(figure_path)){
+    plot_save_pdf(plot = viol,
+                  filename = paste0(figure_path, "/", subject_name, "_",
+                                    module_score, "_viol_", group.by, ".pdf"))
+  }
+  return(viol)
+}
+
+# save module score summary info across group.by for a seurat object
+module_score_summary <- function(seurat, module_score, group.by){
+  mean_score <- c()
+  median_score <- c()
+  sd_score <- c()
+  min_score <- c()
+  max_score <- c()
+  
+  groups <- unique(seurat@meta.data[[group.by]])
+  for(g in groups){
+    # module score in cells belonging to group g
+    group_score <- seurat@meta.data[seurat@meta.data[[group.by]] == g,][[module_score]]
+    
+    avg <- mean(group_score)
+    med <- median(group_score)
+    std <- sd(group_score)
+    min_s <- min(group_score)
+    max_s <- max(group_score)
+    
+    mean_score <- c(mean_score, avg)
+    median_score <- c(median_score, med)
+    sd_score <- c(sd_score, std)
+    min_score <- c(min_score, min_s)
+    max_score <- c(max_score, max_s)
+  }
+  
+  df <- data.frame(
+    group = groups,
+    module_score = rep(module_score, length(groups)),
+    mean_score = mean_score,
+    median_score = median_score,
+    sd_score = sd_score,
+    min_score = min_score,
+    max_score = max_score
+  )
+  
+  # rename group column to the group.by argument
+  colnames(df)[1] <- group.by
+  
+  return(df)
+}
+
+```
+
+```{r Create Result Directories}
+result_dir <- "processed_data/14_B_Module_Score_Comparisons"
+if(!dir.exists(result_dir)){
+  dir.create(result_dir)
+}
+
+figure_dir <- "figures/14_B_Module_Score_Comparisons"
+if(!dir.exists(figure_dir)){
+  dir.create(figure_dir)
+}
+```
+
+```{r Load Data}
+data_dir <- "processed_data/09_Immune_Module_Scores"
+
+# summarries of chemokine module scores
+chemo_segment <- read.csv(file = "processed_data/14_A_Summarize_Module_Scores/module_score_chemokine_segment_summary.csv")[-1]
+
+```
+
+```{r Label all segments with TLS}
+TLS_segments <- c("CP01", "CP03", "CP04", "CP05A", "CP05B",
+                  "NRL01", "NRL05",
+                  "PANIN01", "PANIN02A", "PANIN03", "PANIN04",
+                  "PDAC01", "PDAC05")
+```
+
+```{r Summary of module score}
+# compare chemokine module scores between patients with TLS
+chemo_segment$TLS <- sapply(chemo_segment$segment,
+                            FUN = function(x){
+                              if(x %in% TLS_segments){
+                                return("TLS")
+                              } else {
+                                return("non-TLS")
+                              }
+                            })
+chemo_segment$patient <- c(rep("subject_01", 4),
+                           rep("subject_02", 4),
+                           rep("subject_03", 4),
+                           rep("subject_04", 3),
+                           rep("subject_05", 4))
+
+
+chemo_plot_mean <-
+  ggplot(chemo_segment,
+         aes(x = .data[["TLS"]], y = .data[["mean_score"]],
+             color = .data[["TLS"]], shape = .data[["patient"]])) +
+  geom_point() +
+  stat_compare_means(comparisons = list(c("TLS", "non-TLS"))) +
+  ylab("Mean Chemokine Module Score")
+
+print(chemo_plot_mean)
+plot_save_pdf(chemo_plot_mean,
+              filename = paste0(figure_dir, 
+                           "/chemokine_module_score_segment_mean_comparison.pdf"))
+
+chemo_plot_median <-
+  ggplot(chemo_segment,
+         aes(x = .data[["TLS"]], y = .data[["median_score"]],
+             color = .data[["TLS"]], shape = .data[["patient"]])) +
+  geom_point() +
+  stat_compare_means(comparisons = list(c("TLS", "non-TLS"))) +
+  ylab("Median Chemokine Module Score")
+
+print(chemo_plot_median)
+plot_save_pdf(chemo_plot_median,
+              filename = paste0(figure_dir, 
+                           "/chemokine_module_score_segment_median_comparison.pdf"))
+```
+
+```{r Compare Mean Chemokine Module Scores}
+# subject 01
+seurat <- readRDS(paste0(data_dir, "/subject_01_module_scores.rds"))
+
+plot_module_score_comparison(
+  seurat = seurat, subject_name = "subject_01",
+  module_score = "chemokine_module_score1", group.by = "segment",
+  comparisons = list(
+    c("CP01", "NRL01"), c("CP01", "PANIN01"), c("CP01", "PDAC01"),
+    c("NRL01", "PANIN01"), c("NRL01", "PDAC01"),
+    c("PANIN01", "PDAC01")
+    )
+)
+
+# subject 02
+seurat <- readRDS(paste0(data_dir, "/subject_02_module_scores.rds"))
+
+plot_module_score_comparison(
+  seurat = seurat, subject_name = "subject_02",
+  module_score = "chemokine_module_score1", group.by = "segment",
+  comparisons = list(
+    c("PANIN02A", "PANIN02B"), c("PANIN02A", "NRL02"), c("PANIN02A", "PDAC02"),
+    c("PANIN02B", "NRL02"), c("PANIN02B", "PDAC02"),
+    c("NRL02", "PDAC02")
+    )
+)
+
+# subject 03
+seurat <- readRDS(paste0(data_dir, "/subject_03_module_scores.rds"))
+
+plot_module_score_comparison(
+  seurat = seurat, subject_name = "subject_03",
+  module_score = "chemokine_module_score1", group.by = "segment",
+  comparisons = list(
+    c("CP03", "NRL03"), c("CP03", "PANIN03"), c("CP03", "PDAC03"),
+    c("NRL03", "PANIN03"), c("NRL03", "PDAC03"),
+    c("PANIN03", "PDAC03")
+    )
+)
+
+# subject 04
+seurat <- readRDS(paste0(data_dir, "/subject_04_module_scores.rds"))
+
+plot_module_score_comparison(
+  seurat = seurat, subject_name = "subject_04",
+  module_score = "chemokine_module_score1", group.by = "segment",
+  comparisons = list(
+    c("CP04", "NRL04"), c("CP04", "PANIN04"), 
+    c("NRL04", "PANIN04")
+    )
+)
+
+# subject 05
+seurat <- readRDS(paste0(data_dir, "/subject_05_module_scores.rds"))
+
+plot_module_score_comparison(
+  seurat = seurat, subject_name = "subject_05",
+  module_score = "chemokine_module_score1", group.by = "segment",
+  comparisons = list(
+    c("CP05A", "CP05B"), c("CP05A", "NRL05"), c("CP05A", "PDAC05"),
+    c("CP05B", "NRL05"), c("CP05B", "PDAC05"),
+    c("NRL05", "PDAC05")
+    )
+)
+```
+
+```{r Compare Cancer Module Scores Across Lesion Grades}
+Grade_pal <- c("#EBF4A5", "#F2A93B", "#EA3F25", "#8F00FF")
+
+mod_scores <- c("Classical_module_score1",
+                "Basal_like_module_score1", 
+                "CSC_module_score1")
+epi_types <- c("normal epithelium",
+               "low_grade_PanIN",
+               "high_grade_PanIN",
+               "pdac")
+
+# subject_01
+seurat <- readRDS(paste0(data_dir, "/subject_01_module_scores.rds"))
+# limit to epithelial spots
+seurat <- seurat[,seurat$cell_type_confirmed %in% epi_types]
+seurat$cell_type_confirmed <- factor(seurat$cell_type_confirmed,
+                                     levels = epi_types)
+comparisons <- list(
+  c("normal epithelium", "pdac")
+  )
+
+epi_pal <- Grade_pal[c(1,4)]
+
+for(score in mod_scores){
+  p <- plot_module_score_comparison(
+    seurat = seurat, subject_name = "subject_01",
+    module_score = score, group.by = "cell_type_confirmed",
+    comparisons = comparisons,
+    show = FALSE) +
+    scale_fill_manual(values = epi_pal)
+  print(p)
+  ggsave(plot = p,
+         filename = paste0(figure_dir, "/violin_plot_",
+                           score, "_epithelial_cells_",
+                           "subject_01", ".pdf"),
+         width = unit(6, "in"), height = unit(6, "in"))
+  
+}
+
+# subject_02
+seurat <- readRDS(paste0(data_dir, "/subject_02_module_scores.rds"))
+# limit to epithelial spots
+seurat <- seurat[,seurat$cell_type_confirmed %in% epi_types]
+seurat$cell_type_confirmed <- factor(seurat$cell_type_confirmed,
+                                     levels = epi_types)
+comparisons <- list(
+  c("normal epithelium", "low_grade_PanIN"),
+  c("low_grade_PanIN", "pdac"),
+  c("normal epithelium", "pdac")
+  )
+
+epi_pal <- Grade_pal[c(1,2,4)]
+
+for(score in mod_scores){
+  p <- plot_module_score_comparison(
+    seurat = seurat, subject_name = "subject_02",
+    module_score = score, group.by = "cell_type_confirmed",
+    comparisons = comparisons,
+    show = FALSE) +
+    scale_fill_manual(values = epi_pal)
+  print(p)
+  ggsave(plot = p,
+         filename = paste0(figure_dir, "/violin_plot_",
+                           score, "_epithelial_cells_",
+                           "subject_02", ".pdf"),
+         width = unit(6, "in"), height = unit(6, "in"))
+}
+
+# subject_03
+seurat <- readRDS(paste0(data_dir, "/subject_03_module_scores.rds"))
+# limit to epithelial spots
+seurat <- seurat[,seurat$cell_type_confirmed %in% epi_types]
+seurat$cell_type_confirmed <- factor(seurat$cell_type_confirmed,
+                                     levels = epi_types)
+comparisons <- list(
+  c("normal epithelium", "high_grade_PanIN"),
+  c("high_grade_PanIN", "pdac"),
+  c("normal epithelium", "pdac")
+  )
+
+epi_pal <- Grade_pal[c(1,3,4)]
+
+for(score in mod_scores){
+  p <- plot_module_score_comparison(
+    seurat = seurat, subject_name = "subject_03",
+    module_score = score, group.by = "cell_type_confirmed",
+    comparisons = comparisons,
+    show = FALSE) +
+    scale_fill_manual(values = epi_pal)
+  print(p)
+  ggsave(plot = p,
+         filename = paste0(figure_dir, "/violin_plot_",
+                           score, "_epithelial_cells_",
+                           "subject_03", ".pdf"),
+         width = unit(6, "in"), height = unit(6, "in"))
+}
+
+# subject_04
+seurat <- readRDS(paste0(data_dir, "/subject_04_module_scores.rds"))
+# limit to epithelial spots
+seurat <- seurat[,seurat$cell_type_confirmed %in% epi_types]
+seurat$cell_type_confirmed <- factor(seurat$cell_type_confirmed,
+                                     levels = epi_types)
+comparisons <- list(
+  c("normal epithelium", "low_grade_PanIN")
+  )
+
+epi_pal <- Grade_pal[c(1,2)]
+
+for(score in mod_scores){
+  p <- plot_module_score_comparison(
+    seurat = seurat, subject_name = "subject_04",
+    module_score = score, group.by = "cell_type_confirmed",
+    comparisons = comparisons,
+    show = FALSE) +
+    scale_fill_manual(values = epi_pal)
+  print(p)
+  ggsave(plot = p,
+         filename = paste0(figure_dir, "/violin_plot_",
+                           score, "_epithelial_cells_",
+                           "subject_04", ".pdf"),
+         width = unit(6, "in"), height = unit(6, "in"))
+}
+
+# subject_05
+seurat <- readRDS(paste0(data_dir, "/subject_05_module_scores.rds"))
+# limit to epithelial spots
+seurat <- seurat[,seurat$cell_type_confirmed %in% epi_types]
+seurat$cell_type_confirmed <- factor(seurat$cell_type_confirmed,
+                                     levels = epi_types)
+comparisons <- list(
+  c("normal epithelium", "low_grade_PanIN"),
+  c("low_grade_PanIN", "pdac"),
+  c("normal epithelium", "pdac")
+  )
+
+epi_pal <- Grade_pal[c(1,2,4)]
+
+for(score in mod_scores){
+  p <- plot_module_score_comparison(
+    seurat = seurat, subject_name = "subject_05",
+    module_score = score, group.by = "cell_type_confirmed",
+    comparisons = comparisons,
+    show = FALSE) +
+    scale_fill_manual(values = epi_pal)
+  print(p + scale_fill_manual(values = epi_pal))
+  ggsave(plot = p,
+         filename = paste0(figure_dir, "/violin_plot_",
+                           score, "_epithelial_cells_",
+                           "subject_05", ".pdf"),
+         width = unit(6, "in"), height = unit(6, "in"))
+}
+
+```
+

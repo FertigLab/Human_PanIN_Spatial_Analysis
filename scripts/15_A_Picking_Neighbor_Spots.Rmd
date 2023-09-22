@@ -1,0 +1,783 @@
+---
+title: "15_A_Picking_Neighbor_Spots"
+author: "Jacob Mitchell"
+date: "2023-02-09"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r Load Packages}
+library(Seurat)
+library(STutility)
+library(dplyr)
+library(ggplot2)
+
+sessionInfo()
+```
+
+```{r Custom Functions}
+CreateSTutility <- function(filepath){
+  samples <- "/filtered_feature_bc_matrix.h5"
+  spotfiles <- "/spatial/tissue_positions_list.csv"
+  imgs <- "/spatial/tissue_hires_image.png"
+  json <- "/spatial/scalefactors_json.json"
+  
+  infoTable <-
+    data.frame(
+      "samples" = paste0(filepath, samples),
+      "spotfiles" = paste0(filepath, spotfiles),
+      "imgs" = paste0(filepath, imgs),
+      "json" = paste0(filepath, json)
+    )
+  
+  # create object with same initial processing parameters
+  se <- InputFromTable(infotable = infoTable, 
+                        platform =  "Visium")
+  se <- LoadImages(se)
+  return(se)
+}
+
+RegionNeighboursDistance <- function(seurat, STutility, group.by, ident,
+                                     neighbor_dist = 2, barcode_suffix = NULL){
+  # seurat: primary Seurat object with annotated regions for finding neighbors
+  ## will be returned with the neighbor regions annotated
+  # STutility: seurat object created by STutility::InputFromTable()
+  ## must be created from the same spaceranger ouputs as seurat to match barcodes
+  # group.by: meta data column of annotations for finding neighbors
+  # ident: feature level in group.by for finding surroundings
+  # neighbor_dist: number of concentric neigbor rings to find
+  # barcode_suffix: bugfix to match barcodes when sample id has been added to the barcodes of seurat
+  
+  cell_meta_data <- seurat@meta.data
+  if(!is.null(barcode_suffix)){
+    rownames(cell_meta_data) <- gsub(paste0(barcode_suffix, "$"), "1",
+                                     rownames(cell_meta_data))
+  }
+  
+  # consider only shared spots between the objects based on barcodes
+  cell_meta_data <- cell_meta_data[rownames(se@meta.data),]
+  
+  target_barcodes <- rownames(cell_meta_data[cell_meta_data[[group.by]] == ident,])
+  initial_target <- target_barcodes
+  neighbor_barcodes <- c()
+  
+  for(i in 1:neighbor_dist){
+    se@meta.data[["target"]] <- 
+      sapply(rownames(se@meta.data), FUN = function(x){
+        if(x %in% target_barcodes){
+          return("target")
+        } else {
+          return("surrounding")
+        }
+      })
+    
+    # identify neightbor spots
+    se <- SetIdent(se, value = "target")
+    se <- RegionNeighbours(se, id = "target", verbose = TRUE)
+    # save neighbor barcodes
+    neighbor_barcodes <- 
+      c(neighbor_barcodes,
+        colnames(se[,se[["nbs_target"]] == "nbs_target"]))
+    target_barcodes <- c(target_barcodes, neighbor_barcodes)
+  }
+  
+  if(!is.null(barcode_suffix)){
+    neighbor_barcodes <- gsub("1$", barcode_suffix, neighbor_barcodes)
+    initial_target <- gsub("1$", barcode_suffix, initial_target)
+  }
+  
+  neighbor_cells <- sapply(rownames(seurat@meta.data), FUN = function(x){
+    if(x %in% initial_target){return(ident)}
+    if(x %in% neighbor_barcodes){return(paste0(ident, "_neighbor"))}
+    if(!(x %in% initial_target | x %in% neighbor_barcodes)){return(NA)}})
+    
+  seurat@meta.data[[paste0(ident, "_neighbors_", neighbor_dist)]] <- neighbor_cells
+  
+  return(seurat)
+}
+
+NeighborAnnotation <- function(seurat, STutility, segment, distance = 2,
+                               figure_path = NULL){
+  # consitent annotation of the surroundings of TLS and lesion grades in fewer lines of code
+  # ensure the names of TLS and cell_type_confirmed have been corrected before entering
+  ident <- "TLS"
+  if(ident %in% unique(seurat$TLS)){
+    seurat <- RegionNeighboursDistance(seurat = seurat, STutility = STutility,
+                                       group.by = "TLS", ident = ident,
+                                       neighbor_dist = distance,
+                                       barcode_suffix = segment)
+  } else {seurat@meta.data[[paste0(ident, "_neighbors_", distance)]] <- NA}
+  # surroundings of specific TLS types ("CP_TLS", "PanIN_TLS", "PDAC_TLS")
+  ident <- "CP_TLS"
+  if(ident %in% unique(seurat$TLS_lesion)){
+    seurat <- RegionNeighboursDistance(seurat = seurat, STutility = STutility,
+                                       group.by = "TLS_lesion", ident = ident,
+                                       neighbor_dist = distance,
+                                       barcode_suffix = segment)
+  } else {seurat@meta.data[[paste0(ident, "_neighbors_", distance)]] <- NA}
+  ident <- "PanIN_TLS"
+  if(ident %in% unique(seurat$TLS_lesion)){
+    seurat <- RegionNeighboursDistance(seurat = seurat, STutility = STutility,
+                                       group.by = "TLS_lesion", ident = ident,
+                                       neighbor_dist = distance,
+                                       barcode_suffix = segment)
+  } else {seurat@meta.data[[paste0(ident, "_neighbors_", distance)]] <- NA}
+  ident <- "PDAC_TLS"
+  if(ident %in% unique(seurat$TLS_lesion)){
+    seurat <- RegionNeighboursDistance(seurat = seurat, STutility = STutility,
+                                       group.by = "TLS_lesion", ident = ident,
+                                       neighbor_dist = distance,
+                                       barcode_suffix = segment)
+  } else {seurat@meta.data[[paste0(ident, "_neighbors_", distance)]] <- NA}
+  
+  # epithelial lesion surroundings
+  
+  ident <- "normal_epithelium"
+  if(ident %in% unique(seurat$cell_type_confirmed)){
+    seurat <- RegionNeighboursDistance(seurat = seurat, STutility = STutility,
+                                       group.by = "cell_type_confirmed", ident = ident,
+                                       neighbor_dist = distance,
+                                       barcode_suffix = segment)
+  } else {seurat@meta.data[[paste0(ident, "_neighbors_", distance)]] <- NA}
+  ident <- "low_grade_PanIN"
+  if(ident %in% unique(seurat$cell_type_confirmed)){
+    seurat <- RegionNeighboursDistance(seurat = seurat, STutility = STutility,
+                                       group.by = "cell_type_confirmed", ident = ident,
+                                       neighbor_dist = distance,
+                                       barcode_suffix = segment)
+  } else {seurat@meta.data[[paste0(ident, "_neighbors_", distance)]] <- NA}
+  
+  ident <- "high_grade_PanIN"
+  if(ident %in% unique(seurat$cell_type_confirmed)){
+    seurat <- RegionNeighboursDistance(seurat = seurat, STutility = STutility,
+                                       group.by = "cell_type_confirmed", ident = ident,
+                                       neighbor_dist = distance,
+                                       barcode_suffix = segment)
+  } else {seurat@meta.data[[paste0(ident, "_neighbors_", distance)]] <- NA}
+  
+  ident <- "pdac"
+  if(ident %in% unique(seurat$cell_type_confirmed)){
+      seurat <- RegionNeighboursDistance(seurat = seurat, STutility = STutility,
+                                         group.by = "cell_type_confirmed", ident = ident,
+                                         neighbor_dist = distance,
+                                         barcode_suffix = segment)
+    } else {seurat@meta.data[[paste0(ident, "_neighbors_", distance)]] <- NA}
+  
+  idents <- c("TLS", "CP_TLS", "PanIN_TLS", "PDAC_TLS",
+              "normal_epithelium", "low_grade_PanIN", "high_grade_PanIN", "pdac")
+  for(i in idents){
+    feature_name <- paste0(i, "_neighbors_", distance)
+    color_pal <- list()
+    color_pal[[i]] <- "#FF0000"
+    color_pal[[paste0(i, "_neighbor")]] <- "#FFFFFF"
+      
+    
+    if(sum(!is.na(seurat@meta.data[[feature_name]]))){
+      Idents(seurat) <- seurat@meta.data[[feature_name]]
+      p_tls <- SpatialDimPlot(seurat, images = segment) +
+        scale_fill_manual(values = color_pal) +
+        theme(legend.position = "bottom") +
+        ggtitle(paste0(segment, ": ", i, " Adjacent_spots"))
+      print(p_tls)
+      ggsave(plot = p_tls,
+             file = paste0(figure_path, "/", segment, "_", i, "_neighbors.pdf"),
+             width = unit(6, "in"), height = unit(6, "in"))
+    }
+  }
+  return(seurat)
+}
+```
+
+```{r Create Result Directories}
+result_dir <- "processed_data/15_A_Picking_Neighbor_Spots"
+if(!dir.exists(result_dir)){
+  dir.create(result_dir)
+}
+
+figure_dir <- "figures/15_A_Picking_Neighbor_Spots"
+if(!dir.exists(figure_dir)){
+  dir.create(figure_dir)
+}
+```
+
+```{r Subject 01}
+adjacency <- NULL
+
+# load panin01 data processed up to this point
+seurat <- readRDS("processed_data/09_Immune_Module_Scores/subject_01_module_scores.rds")
+
+# fix spacing in cell_type_confirmed
+seurat$cell_type_confirmed <- gsub(" ", "_", seurat$cell_type_confirmed)
+# redefine TLS from TRUE/FALSE to TLS/non-TLS
+seurat$TLS <- sapply(seurat$TLS, FUN = function(x){
+  if(x == TRUE){return("TLS")}
+  if(x == FALSE){return("non-TLS")}
+})
+
+## CP01
+segment <- "CP01"
+# create figure directory
+segment_dir <- paste0(figure_dir, "/", segment)
+if(!dir.exists(segment_dir)){
+  dir.create(segment_dir)
+}
+# limit to segment
+ser <- seurat[, seurat$segment == segment]
+
+se <- CreateSTutility(paste0("data/MultiLesionCohort/", segment))
+ser <- NeighborAnnotation(seurat = ser, STutility = se, segment = segment,
+                             figure_path = segment_dir)
+
+# save dataframe of adjacency barcodes
+neighbors <- c("TLS_neighbors_2", "CP_TLS_neighbors_2", "PanIN_TLS_neighbors_2",
+               "PDAC_TLS_neighbors_2",
+               "normal_epithelium_neighbors_2", "low_grade_PanIN_neighbors_2",
+               "high_grade_PanIN_neighbors_2", "pdac_neighbors_2")
+adjacency <- rbind(adjacency, ser@meta.data[, neighbors])
+
+# remove partial seurat object
+rm(ser)
+
+## NRL01
+segment <- "NRL01"
+# create figure directory
+segment_dir <- paste0(figure_dir, "/", segment)
+if(!dir.exists(segment_dir)){
+  dir.create(segment_dir)
+}
+# limit to segment
+ser <- seurat[, seurat$segment == segment]
+
+se <- CreateSTutility(paste0("data/MultiLesionCohort/", segment))
+ser <- NeighborAnnotation(seurat = ser, STutility = se, segment = segment,
+                             figure_path = segment_dir)
+
+# save dataframe of adjacency barcodes
+neighbors <- c("TLS_neighbors_2", "CP_TLS_neighbors_2", "PanIN_TLS_neighbors_2",
+               "PDAC_TLS_neighbors_2",
+               "normal_epithelium_neighbors_2", "low_grade_PanIN_neighbors_2",
+               "high_grade_PanIN_neighbors_2", "pdac_neighbors_2")
+adjacency <- rbind(adjacency, ser@meta.data[, neighbors])
+
+# remove partial seurat object
+rm(ser)
+
+## PANIN01
+segment <- "PANIN01"
+# create figure directory
+segment_dir <- paste0(figure_dir, "/", segment)
+if(!dir.exists(segment_dir)){
+  dir.create(segment_dir)
+}
+# limit to segment
+ser <- seurat[, seurat$segment == segment]
+
+se <- CreateSTutility(paste0("data/MultiLesionCohort/", segment))
+ser <- NeighborAnnotation(seurat = ser, STutility = se, segment = segment,
+                             figure_path = segment_dir)
+
+# save dataframe of adjacency barcodes
+neighbors <- c("TLS_neighbors_2", "CP_TLS_neighbors_2", "PanIN_TLS_neighbors_2",
+               "PDAC_TLS_neighbors_2",
+               "normal_epithelium_neighbors_2", "low_grade_PanIN_neighbors_2",
+               "high_grade_PanIN_neighbors_2", "pdac_neighbors_2")
+adjacency <- rbind(adjacency, ser@meta.data[, neighbors])
+
+# remove partial seurat object
+rm(ser)
+
+## PDAC01
+segment <- "PDAC01"
+# create figure directory
+segment_dir <- paste0(figure_dir, "/", segment)
+if(!dir.exists(segment_dir)){
+  dir.create(segment_dir)
+}
+# limit to segment
+ser <- seurat[, seurat$segment == segment]
+
+se <- CreateSTutility(paste0("data/MultiLesionCohort/", segment))
+ser <- NeighborAnnotation(seurat = ser, STutility = se, segment = segment,
+                             figure_path = segment_dir)
+
+# save dataframe of adjacency barcodes
+neighbors <- c("TLS_neighbors_2", "CP_TLS_neighbors_2", "PanIN_TLS_neighbors_2",
+               "PDAC_TLS_neighbors_2",
+               "normal_epithelium_neighbors_2", "low_grade_PanIN_neighbors_2",
+               "high_grade_PanIN_neighbors_2", "pdac_neighbors_2")
+adjacency <- rbind(adjacency, ser@meta.data[, neighbors])
+
+# remove partial seurat object
+rm(ser)
+
+# Add new annotations to the full seurat object
+adjacency <- adjacency[colnames(seurat),]
+seurat@meta.data <- cbind(seurat@meta.data, adjacency)
+
+# save RDS
+saveRDS(seurat,
+        file = paste0(result_dir, "/subject_01_adjacent_spots.rds"))
+# remove seurat object from memory
+rm(seurat)
+```
+
+```{r Subject 02}
+adjacency <- NULL
+
+# load panin01 data processed up to this point
+seurat <- readRDS("processed_data/09_Immune_Module_Scores/subject_02_module_scores.rds")
+
+# fix spacing in cell_type_confirmed
+seurat$cell_type_confirmed <- gsub(" ", "_", seurat$cell_type_confirmed)
+# redefine TLS from TRUE/FALSE to TLS/non-TLS
+seurat$TLS <- sapply(seurat$TLS, FUN = function(x){
+  if(x == TRUE){return("TLS")}
+  if(x == FALSE){return("non-TLS")}
+})
+
+## NRL02
+segment <- "NRL02"
+# create figure directory
+segment_dir <- paste0(figure_dir, "/", segment)
+if(!dir.exists(segment_dir)){
+  dir.create(segment_dir)
+}
+# limit to segment
+ser <- seurat[, seurat$segment == segment]
+
+se <- CreateSTutility(paste0("data/MultiLesionCohort/", segment))
+ser <- NeighborAnnotation(seurat = ser, STutility = se, segment = segment,
+                             figure_path = segment_dir)
+
+# save dataframe of adjacency barcodes
+neighbors <- c("TLS_neighbors_2", "CP_TLS_neighbors_2", "PanIN_TLS_neighbors_2",
+               "PDAC_TLS_neighbors_2",
+               "normal_epithelium_neighbors_2", "low_grade_PanIN_neighbors_2",
+               "high_grade_PanIN_neighbors_2", "pdac_neighbors_2")
+adjacency <- rbind(adjacency, ser@meta.data[, neighbors])
+
+# remove partial seurat object
+rm(ser)
+
+## PANIN02A
+segment <- "PANIN02A"
+# create figure directory
+segment_dir <- paste0(figure_dir, "/", segment)
+if(!dir.exists(segment_dir)){
+  dir.create(segment_dir)
+}
+# limit to segment
+ser <- seurat[, seurat$segment == segment]
+
+se <- CreateSTutility(paste0("data/MultiLesionCohort/", segment))
+ser <- NeighborAnnotation(seurat = ser, STutility = se, segment = segment,
+                             figure_path = segment_dir)
+
+# save dataframe of adjacency barcodes
+neighbors <- c("TLS_neighbors_2", "CP_TLS_neighbors_2", "PanIN_TLS_neighbors_2",
+               "PDAC_TLS_neighbors_2",
+               "normal_epithelium_neighbors_2", "low_grade_PanIN_neighbors_2",
+               "high_grade_PanIN_neighbors_2", "pdac_neighbors_2")
+adjacency <- rbind(adjacency, ser@meta.data[, neighbors])
+
+# remove partial seurat object
+rm(ser)
+
+## PANIN02B
+segment <- "PANIN02B"
+# create figure directory
+segment_dir <- paste0(figure_dir, "/", segment)
+if(!dir.exists(segment_dir)){
+  dir.create(segment_dir)
+}
+# limit to segment
+ser <- seurat[, seurat$segment == segment]
+
+se <- CreateSTutility(paste0("data/MultiLesionCohort/", segment))
+ser <- NeighborAnnotation(seurat = ser, STutility = se, segment = segment,
+                             figure_path = segment_dir)
+
+# save dataframe of adjacency barcodes
+neighbors <- c("TLS_neighbors_2", "CP_TLS_neighbors_2", "PanIN_TLS_neighbors_2",
+               "PDAC_TLS_neighbors_2",
+               "normal_epithelium_neighbors_2", "low_grade_PanIN_neighbors_2",
+               "high_grade_PanIN_neighbors_2", "pdac_neighbors_2")
+adjacency <- rbind(adjacency, ser@meta.data[, neighbors])
+
+# remove partial seurat object
+rm(ser)
+
+## PDAC02
+segment <- "PDAC02"
+# create figure directory
+segment_dir <- paste0(figure_dir, "/", segment)
+if(!dir.exists(segment_dir)){
+  dir.create(segment_dir)
+}
+# limit to segment
+ser <- seurat[, seurat$segment == segment]
+
+se <- CreateSTutility(paste0("data/MultiLesionCohort/", segment))
+ser <- NeighborAnnotation(seurat = ser, STutility = se, segment = segment,
+                             figure_path = segment_dir)
+
+# save dataframe of adjacency barcodes
+neighbors <- c("TLS_neighbors_2", "CP_TLS_neighbors_2", "PanIN_TLS_neighbors_2",
+               "PDAC_TLS_neighbors_2",
+               "normal_epithelium_neighbors_2", "low_grade_PanIN_neighbors_2",
+               "high_grade_PanIN_neighbors_2", "pdac_neighbors_2")
+adjacency <- rbind(adjacency, ser@meta.data[, neighbors])
+
+# remove partial seurat object
+rm(ser)
+
+# Add new annotations to the full seurat object
+adjacency <- adjacency[colnames(seurat),]
+seurat@meta.data <- cbind(seurat@meta.data, adjacency)
+
+# save RDS
+saveRDS(seurat,
+        file = paste0(result_dir, "/subject_02_adjacent_spots.rds"))
+# remove seurat object from memory
+rm(seurat)
+```
+
+```{r Subject 03}
+adjacency <- NULL
+
+seurat <- readRDS("processed_data/09_Immune_Module_Scores/subject_03_module_scores.rds")
+
+# fix spacing in cell_type_confirmed
+seurat$cell_type_confirmed <- gsub(" ", "_", seurat$cell_type_confirmed)
+# redefine TLS from TRUE/FALSE to TLS/non-TLS
+seurat$TLS <- sapply(seurat$TLS, FUN = function(x){
+  if(x == TRUE){return("TLS")}
+  if(x == FALSE){return("non-TLS")}
+})
+
+## CP03
+segment <- "CP03"
+# create figure directory
+segment_dir <- paste0(figure_dir, "/", segment)
+if(!dir.exists(segment_dir)){
+  dir.create(segment_dir)
+}
+# limit to segment
+ser <- seurat[, seurat$segment == segment]
+
+se <- CreateSTutility(paste0("data/MultiLesionCohort/", segment))
+ser <- NeighborAnnotation(seurat = ser, STutility = se, segment = segment,
+                             figure_path = segment_dir)
+
+# save dataframe of adjacency barcodes
+neighbors <- c("TLS_neighbors_2", "CP_TLS_neighbors_2", "PanIN_TLS_neighbors_2",
+               "PDAC_TLS_neighbors_2",
+               "normal_epithelium_neighbors_2", "low_grade_PanIN_neighbors_2",
+               "high_grade_PanIN_neighbors_2", "pdac_neighbors_2")
+adjacency <- rbind(adjacency, ser@meta.data[, neighbors])
+
+# remove partial seurat object
+rm(ser)
+
+## NRL03
+segment <- "NRL03"
+# create figure directory
+segment_dir <- paste0(figure_dir, "/", segment)
+if(!dir.exists(segment_dir)){
+  dir.create(segment_dir)
+}
+# limit to segment
+ser <- seurat[, seurat$segment == segment]
+
+se <- CreateSTutility(paste0("data/MultiLesionCohort/", segment))
+ser <- NeighborAnnotation(seurat = ser, STutility = se, segment = segment,
+                             figure_path = segment_dir)
+
+# save dataframe of adjacency barcodes
+neighbors <- c("TLS_neighbors_2", "CP_TLS_neighbors_2", "PanIN_TLS_neighbors_2",
+               "PDAC_TLS_neighbors_2",
+               "normal_epithelium_neighbors_2", "low_grade_PanIN_neighbors_2",
+               "high_grade_PanIN_neighbors_2", "pdac_neighbors_2")
+adjacency <- rbind(adjacency, ser@meta.data[, neighbors])
+
+# remove partial seurat object
+rm(ser)
+
+## PANIN03
+segment <- "PANIN03"
+# create figure directory
+segment_dir <- paste0(figure_dir, "/", segment)
+if(!dir.exists(segment_dir)){
+  dir.create(segment_dir)
+}
+# limit to segment
+ser <- seurat[, seurat$segment == segment]
+
+se <- CreateSTutility(paste0("data/MultiLesionCohort/", segment))
+ser <- NeighborAnnotation(seurat = ser, STutility = se, segment = segment,
+                             figure_path = segment_dir)
+
+# save dataframe of adjacency barcodes
+neighbors <- c("TLS_neighbors_2", "CP_TLS_neighbors_2", "PanIN_TLS_neighbors_2",
+               "PDAC_TLS_neighbors_2",
+               "normal_epithelium_neighbors_2", "low_grade_PanIN_neighbors_2",
+               "high_grade_PanIN_neighbors_2", "pdac_neighbors_2")
+adjacency <- rbind(adjacency, ser@meta.data[, neighbors])
+
+# remove partial seurat object
+rm(ser)
+
+## PDAC03
+segment <- "PDAC03"
+# create figure directory
+segment_dir <- paste0(figure_dir, "/", segment)
+if(!dir.exists(segment_dir)){
+  dir.create(segment_dir)
+}
+# limit to segment
+ser <- seurat[, seurat$segment == segment]
+
+se <- CreateSTutility(paste0("data/MultiLesionCohort/", segment))
+ser <- NeighborAnnotation(seurat = ser, STutility = se, segment = segment,
+                             figure_path = segment_dir)
+
+# save dataframe of adjacency barcodes
+neighbors <- c("TLS_neighbors_2", "CP_TLS_neighbors_2", "PanIN_TLS_neighbors_2",
+               "PDAC_TLS_neighbors_2",
+               "normal_epithelium_neighbors_2", "low_grade_PanIN_neighbors_2",
+               "high_grade_PanIN_neighbors_2", "pdac_neighbors_2")
+adjacency <- rbind(adjacency, ser@meta.data[, neighbors])
+
+# remove partial seurat object
+rm(ser)
+
+# Add new annotations to the full seurat object
+adjacency <- adjacency[colnames(seurat),]
+seurat@meta.data <- cbind(seurat@meta.data, adjacency)
+
+# save RDS
+saveRDS(seurat,
+        file = paste0(result_dir, "/subject_03_adjacent_spots.rds"))
+# remove seurat object from memory
+rm(seurat)
+```
+
+```{r Subject 04}
+adjacency <- NULL
+
+# load panin01 data processed up to this point
+seurat <- readRDS("processed_data/09_Immune_Module_Scores/subject_04_module_scores.rds")
+
+# fix spacing in cell_type_confirmed
+seurat$cell_type_confirmed <- gsub(" ", "_", seurat$cell_type_confirmed)
+# redefine TLS from TRUE/FALSE to TLS/non-TLS
+seurat$TLS <- sapply(seurat$TLS, FUN = function(x){
+  if(x == TRUE){return("TLS")}
+  if(x == FALSE){return("non-TLS")}
+})
+
+## CP04
+segment <- "CP04"
+# create figure directory
+segment_dir <- paste0(figure_dir, "/", segment)
+if(!dir.exists(segment_dir)){
+  dir.create(segment_dir)
+}
+# limit to segment
+ser <- seurat[, seurat$segment == segment]
+
+se <- CreateSTutility(paste0("data/MultiLesionCohort/", segment))
+ser <- NeighborAnnotation(seurat = ser, STutility = se, segment = segment,
+                             figure_path = segment_dir)
+
+# save dataframe of adjacency barcodes
+neighbors <- c("TLS_neighbors_2", "CP_TLS_neighbors_2", "PanIN_TLS_neighbors_2",
+               "PDAC_TLS_neighbors_2",
+               "normal_epithelium_neighbors_2", "low_grade_PanIN_neighbors_2",
+               "high_grade_PanIN_neighbors_2", "pdac_neighbors_2")
+adjacency <- rbind(adjacency, ser@meta.data[, neighbors])
+
+# remove partial seurat object
+rm(ser)
+
+## NRL04
+segment <- "NRL04"
+# create figure directory
+segment_dir <- paste0(figure_dir, "/", segment)
+if(!dir.exists(segment_dir)){
+  dir.create(segment_dir)
+}
+# limit to segment
+ser <- seurat[, seurat$segment == segment]
+
+se <- CreateSTutility(paste0("data/MultiLesionCohort/", segment))
+ser <- NeighborAnnotation(seurat = ser, STutility = se, segment = segment,
+                             figure_path = segment_dir)
+
+# save dataframe of adjacency barcodes
+neighbors <- c("TLS_neighbors_2", "CP_TLS_neighbors_2", "PanIN_TLS_neighbors_2",
+               "PDAC_TLS_neighbors_2",
+               "normal_epithelium_neighbors_2", "low_grade_PanIN_neighbors_2",
+               "high_grade_PanIN_neighbors_2", "pdac_neighbors_2")
+adjacency <- rbind(adjacency, ser@meta.data[, neighbors])
+
+# remove partial seurat object
+rm(ser)
+
+## PANIN04
+segment <- "PANIN04"
+# create figure directory
+segment_dir <- paste0(figure_dir, "/", segment)
+if(!dir.exists(segment_dir)){
+  dir.create(segment_dir)
+}
+# limit to segment
+ser <- seurat[, seurat$segment == segment]
+
+se <- CreateSTutility(paste0("data/MultiLesionCohort/", segment))
+ser <- NeighborAnnotation(seurat = ser, STutility = se, segment = segment,
+                             figure_path = segment_dir)
+
+# save dataframe of adjacency barcodes
+neighbors <- c("TLS_neighbors_2", "CP_TLS_neighbors_2", "PanIN_TLS_neighbors_2",
+               "PDAC_TLS_neighbors_2",
+               "normal_epithelium_neighbors_2", "low_grade_PanIN_neighbors_2",
+               "high_grade_PanIN_neighbors_2", "pdac_neighbors_2")
+adjacency <- rbind(adjacency, ser@meta.data[, neighbors])
+
+# remove partial seurat object
+rm(ser)
+
+# Add new annotations to the full seurat object
+adjacency <- adjacency[colnames(seurat),]
+seurat@meta.data <- cbind(seurat@meta.data, adjacency)
+
+# save RDS
+saveRDS(seurat,
+        file = paste0(result_dir, "/subject_04_adjacent_spots.rds"))
+# remove seurat object from memory
+rm(seurat)
+```
+
+```{r Subject 05}
+adjacency <- NULL
+
+seurat <- readRDS("processed_data/09_Immune_Module_Scores/subject_05_module_scores.rds")
+
+# fix spacing in cell_type_confirmed
+seurat$cell_type_confirmed <- gsub(" ", "_", seurat$cell_type_confirmed)
+# redefine TLS from TRUE/FALSE to TLS/non-TLS
+seurat$TLS <- sapply(seurat$TLS, FUN = function(x){
+  if(x == TRUE){return("TLS")}
+  if(x == FALSE){return("non-TLS")}
+})
+
+## CP05A
+segment <- "CP05A"
+# create figure directory
+segment_dir <- paste0(figure_dir, "/", segment)
+if(!dir.exists(segment_dir)){
+  dir.create(segment_dir)
+}
+# limit to segment
+ser <- seurat[, seurat$segment == segment]
+
+se <- CreateSTutility(paste0("data/MultiLesionCohort/", segment))
+ser <- NeighborAnnotation(seurat = ser, STutility = se, segment = segment,
+                             figure_path = segment_dir)
+
+# save dataframe of adjacency barcodes
+neighbors <- c("TLS_neighbors_2", "CP_TLS_neighbors_2", "PanIN_TLS_neighbors_2",
+               "PDAC_TLS_neighbors_2",
+               "normal_epithelium_neighbors_2", "low_grade_PanIN_neighbors_2",
+               "high_grade_PanIN_neighbors_2", "pdac_neighbors_2")
+adjacency <- rbind(adjacency, ser@meta.data[, neighbors])
+
+# remove partial seurat object
+rm(ser)
+
+## CP05B
+segment <- "CP05B"
+# create figure directory
+segment_dir <- paste0(figure_dir, "/", segment)
+if(!dir.exists(segment_dir)){
+  dir.create(segment_dir)
+}
+# limit to segment
+ser <- seurat[, seurat$segment == segment]
+
+se <- CreateSTutility(paste0("data/MultiLesionCohort/", segment))
+ser <- NeighborAnnotation(seurat = ser, STutility = se, segment = segment,
+                             figure_path = segment_dir)
+
+# save dataframe of adjacency barcodes
+neighbors <- c("TLS_neighbors_2", "CP_TLS_neighbors_2", "PanIN_TLS_neighbors_2",
+               "PDAC_TLS_neighbors_2",
+               "normal_epithelium_neighbors_2", "low_grade_PanIN_neighbors_2",
+               "high_grade_PanIN_neighbors_2", "pdac_neighbors_2")
+adjacency <- rbind(adjacency, ser@meta.data[, neighbors])
+
+# remove partial seurat object
+rm(ser)
+
+## NRL05
+segment <- "NRL05"
+# create figure directory
+segment_dir <- paste0(figure_dir, "/", segment)
+if(!dir.exists(segment_dir)){
+  dir.create(segment_dir)
+}
+# limit to segment
+ser <- seurat[, seurat$segment == segment]
+
+se <- CreateSTutility(paste0("data/MultiLesionCohort/", segment))
+ser <- NeighborAnnotation(seurat = ser, STutility = se, segment = segment,
+                             figure_path = segment_dir)
+
+# save dataframe of adjacency barcodes
+neighbors <- c("TLS_neighbors_2", "CP_TLS_neighbors_2", "PanIN_TLS_neighbors_2",
+               "PDAC_TLS_neighbors_2",
+               "normal_epithelium_neighbors_2", "low_grade_PanIN_neighbors_2",
+               "high_grade_PanIN_neighbors_2", "pdac_neighbors_2")
+adjacency <- rbind(adjacency, ser@meta.data[, neighbors])
+
+# remove partial seurat object
+rm(ser)
+
+## PDAC05
+segment <- "PDAC05"
+# create figure directory
+segment_dir <- paste0(figure_dir, "/", segment)
+if(!dir.exists(segment_dir)){
+  dir.create(segment_dir)
+}
+# limit to segment
+ser <- seurat[, seurat$segment == segment]
+
+se <- CreateSTutility(paste0("data/MultiLesionCohort/", segment))
+ser <- NeighborAnnotation(seurat = ser, STutility = se, segment = segment,
+                             figure_path = segment_dir)
+
+# save dataframe of adjacency barcodes
+neighbors <- c("TLS_neighbors_2", "CP_TLS_neighbors_2", "PanIN_TLS_neighbors_2",
+               "PDAC_TLS_neighbors_2",
+               "normal_epithelium_neighbors_2", "low_grade_PanIN_neighbors_2",
+               "high_grade_PanIN_neighbors_2", "pdac_neighbors_2")
+adjacency <- rbind(adjacency, ser@meta.data[, neighbors])
+
+# remove partial seurat object
+rm(ser)
+
+# Add new annotations to the full seurat object
+adjacency <- adjacency[colnames(seurat),]
+seurat@meta.data <- cbind(seurat@meta.data, adjacency)
+
+# save RDS
+saveRDS(seurat,
+        file = paste0(result_dir, "/subject_05_adjacent_spots.rds"))
+# remove seurat object from memory
+rm(seurat)
+```
