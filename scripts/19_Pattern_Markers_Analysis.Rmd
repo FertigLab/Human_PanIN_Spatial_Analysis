@@ -284,6 +284,7 @@ for(tf in unique(tf_highlight, tf_pat1_hicor)){
   print(tf)
   p <- SpatialFeaturePlot(seurat, images = "PANIN01", features = tf, pt.size.factor = 2) +
     scale_fill_gradientn(colors = viridis_pal(option = "G")(30))
+  print(p)
   ggsave(plot = p,
          filename = paste0(figure_dir, "/spatial_feature_", tf, "_" , "PANIN01", ".pdf"),
          width = unit(6, "in"), height = unit(6, "in"))

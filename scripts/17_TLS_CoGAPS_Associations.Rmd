@@ -937,6 +937,13 @@ write.csv(tf_cor_res,
           file = paste0(result_dir, "/TF_pattern_correlation_matrix.csv"))
 ```
 
+```{r}
+# save table of plotted cell meta data
+plot_meta <- seurat_TF@meta.data[, c("cell_type_confirmed", "segment", "TLS_lesion", "Pattern_1", "chemokine_module_score1", "ETS1_tf.score", "FOXP3_tf.score", "PAX5_tf.score", "NFKB2_tf.score")]
+
+write.csv(plot_meta, file = paste0(result_dir, "/", "spot_meta_features", ".csv"))
+```
+
 ```{r CoGAPS Pattern Amplitude analysis}
 # scale A matrix of gene amplitudes for each pattern
 scaled_A <- t(scale(t(cogaps_results[["n10_patterns"]]@featureLoadings)))

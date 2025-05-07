@@ -1,0 +1,103 @@
+---
+title: "05_B_cluster_highlight_plots"
+author: "Jacob Mitchell"
+date: "2024-01-12"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(Seurat)
+library(ggplot2)
+library(ggpubr)
+library(gridExtra)
+library(RColorBrewer)
+
+set.seed(123)
+sessionInfo()
+```
+
+```{r}
+figure_dir <- "figures/05_B_cluster_highlight_plots"
+if(!dir.exists(figure_dir)) dir.create(figure_dir)
+
+seurat <- readRDS("processed_data/05_A_PanIN_Validation_Cohort/02_PANIN_segments_CompleteProcessing.rds")
+
+colorcount <- length(levels(seurat$post_harmony_clusters))
+myPalette <- colorRampPalette(brewer.pal(12, "Paired"))
+ml_pal <- myPalette(colorcount)
+clusters <- levels(seurat$post_harmony_clusters)
+names(ml_pal) <- clusters
+```
+
+```{r}
+Idents(seurat) <- seurat$post_harmony_clusters
+image_names <- Images(seurat)
+
+for(i in seq_along(image_names)){
+  img <- image_names[i]
+  pl_ls <- list()
+  
+  barcode_highlight <- rownames(seurat@meta.data[seurat$post_harmony_clusters == 8,])
+  p_epi <- SpatialDimPlot(
+      seurat, images = img, pt.size.factor = 2, 
+      cells.highlight = barcode_highlight, 
+      cols.highlight = c("Group_1" = "#FF0000", "Unselected" = "#CCCCCC")
+    ) +
+      theme(legend.position = "none") +
+      ggtitle("Duct + PanIN")
+  pl_ls[["ductal"]] <- p_epi
+  
+  for(j in seq_along(clusters)){
+    cl <- as.character(clusters[j])
+    barcode_highlight <- rownames(seurat@meta.data[seurat$post_harmony_clusters == cl,])
+    
+    p <- SpatialDimPlot(
+      seurat, images = img, pt.size.factor = 2, 
+      cells.highlight = barcode_highlight, 
+      cols.highlight = c("Group_1" = "#FF0000", "Unselected" = "#CCCCCC")
+    ) +
+      theme(legend.position = "none") +
+      ggtitle(cl)
+    
+    pl_ls[[cl]] <- p
+  }
+  pl_arrange <- grid.arrange(grobs = pl_ls, ncol = 5)
+  ggsave(
+    plot = as_ggplot(pl_arrange),
+    file = paste0(figure_dir, "/", img, "_Louvain_cluster_highlight", ".pdf"),
+    width = unit(12, "in"), height = unit(9, "in")
+  )
+}
+```
+
+```{r}
+# assessment of panin / normal epithemium segregation with changed clustering resolution
+seurat <- FindClusters(seurat, resolution = 0.2)
+seurat <- FindClusters(seurat, resolution = 0.5)
+seurat <- FindClusters(seurat, resolution = 1.0)
+seurat <- FindClusters(seurat, resolution = 1.4)
+seurat <- FindClusters(seurat, resolution = 1.8)
+seurat <- FindClusters(seurat, resolution = 2.0)
+seurat <- FindClusters(seurat, resolution = 4.0)
+
+table(seurat$SCT_snn_res.0.2, seurat$cell_type_confirmed)
+table(seurat$SCT_snn_res.0.5, seurat$cell_type_confirmed)
+table(seurat$post_harmony_clusters, seurat$cell_type_confirmed)
+table(seurat$SCT_snn_res.1, seurat$cell_type_confirmed)
+table(seurat$SCT_snn_res.1.4, seurat$cell_type_confirmed)
+table(seurat$SCT_snn_res.1.8, seurat$cell_type_confirmed)
+table(seurat$SCT_snn_res.2, seurat$cell_type_confirmed)
+table(seurat$SCT_snn_res.4, seurat$cell_type_confirmed)
+```
+
+```{r}
+# differential expression results
+de <- read.table(file = "processed_data/05_A_PanIN_Validation_Cohort/DE_PanIN_v_Ductal_Mast", sep = ",")
+
+
+```
+

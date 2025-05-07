@@ -8,9 +8,13 @@ manuscript/
 Omnipathr-log/
 pattern_projection/
 IMC_analysis/
+GEO_upload/
+reviewer_feedback/
 
 # ignore knitted rmd files
 scripts/*.html
+# ignore DS_Store
+.DS_Store
 
 # History files
 .Rhistory
