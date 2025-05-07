@@ -1,0 +1,606 @@
+---
+title: "03_A_tcell_analysis_v2"
+output: html_document
+date: "2024-11-04"
+---
+
+Cleaned version of 03_A_tcell_analysis, plotting completed in functions.
+
+```{r setup, include=FALSE}
+# knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(dittoSeq)
+library(pals)
+library(ggpubr)
+library(tidyverse)
+
+set.seed(123)
+sessionInfo()
+```
+
+```{r}
+result_dir <- "processed_data/03_A_tcell_analysis"
+if(!dir.exists(result_dir)) dir.create(result_dir)
+figure_dir <- "figures/03_A_tcell_analysis"
+if(!dir.exists(figure_dir)) dir.create(figure_dir)
+```
+
+```{r}
+# Import .rds from immune cell clustering
+cell_meta <- read.csv("processed_data/02_C_cell_type_annotation/IMC_integrated_metadata_arcsinh.csv", row.names = 1)
+
+# Import raw IMC data for ROI area calculations
+raw_data <- read.csv("processed_data/01_IMC_metadata_annotation/raw_IMC.csv", row.names = 1)
+
+# Import Lymphoid Aggregate metadata
+lymphoid_aggregate_spatial <- read.csv("processed_data/01_IMC_metadata_annotation/sample_metadata.csv", row.names = 1)
+
+```
+
+```{r}
+# Assign total areas per ROI
+
+# Run range function on x and y positions
+raw_data$region <- cell_meta$region
+areas <- raw_data %>%
+  group_by(sample_id) %>%
+  summarise(
+    max_X_mag = (max(X_position, na.rm = TRUE) - min(X_position, na.rm = TRUE)),
+    max_Y_mag = (max(Y_position, na.rm = TRUE) - min(Y_position, na.rm = TRUE)),
+    region = first(region)
+  )
+
+areas$ROI_area <- areas$max_X_mag * areas$max_Y_mag
+colnames(areas)[colnames(areas) == "sample_id"] <- "ImageId"
+```
+
+```{r}
+# Initialize counts with unique ImageIds and specific immune clusters
+counts <- data.frame()
+unique_image_ids <- unique(cell_meta$ImageId)
+target_immune_clusters <- c("CD8_Tcell", "CD4_Th", "CD4_Treg")
+
+# Populate counts with cell counts for each cluster
+for (img_id in unique_image_ids) {
+  img_data <- cell_meta[cell_meta$ImageId == img_id, ]
+  reg <- img_data$region[1]
+  
+  for (immune_cluster in target_immune_clusters) {
+    cluster_data <- img_data[img_data$immune_cluster_specific == immune_cluster, ]
+    cell_count <- sum(!is.na(unique(cluster_data$cell)))
+    
+    new_row <- data.frame(
+      ImageId = img_id,
+      region = reg,
+      immune_cluster_specific = immune_cluster,
+      cell_count = cell_count
+    )
+    counts <- rbind(counts, new_row)
+  }
+}
+
+# Append area and calculate densities in a single step
+counts <- counts %>%
+  left_join(dplyr::select(areas, ImageId, ROI_area), by = "ImageId") %>%
+  mutate(
+    densities = cell_count / ROI_area,
+    region = gsub("[0-9]", "", region)
+  )
+
+# specify group order as a factor
+counts$region <- factor(
+  counts$region,
+  levels = c("Normal", "PanIN", "TumorEdge", "TumorCore", "LymphoidAggregate")
+)
+
+# Counts for Broad T Cells
+counts_broad <- data.frame()
+unique_image_ids <- unique(cell_meta$ImageId)
+target_immune_clusters <- c("Tcell")
+
+# Populate counts with cell counts for each cluster
+for (img_id in unique_image_ids) {
+  img_data <- cell_meta[cell_meta$ImageId == img_id, ]
+  reg <- img_data$region[1]
+  
+  for (immune_cluster in target_immune_clusters) {
+    cluster_data <- img_data[img_data$immune_cluster_broad == immune_cluster, ]
+    cell_count <- sum(!is.na(unique(cluster_data$cell)))
+    
+    new_row <- data.frame(
+      ImageId = img_id,
+      region = reg,
+      immune_cluster_specific = immune_cluster,
+      cell_count = cell_count
+    )
+    counts_broad <- rbind(counts_broad, new_row)
+  }
+}
+
+# Append area and calculate densities in a single step
+counts_broad <- counts_broad %>%
+  left_join(dplyr::select(areas, ImageId, ROI_area), by = "ImageId") %>%
+  mutate(
+    densities = cell_count / ROI_area,
+    region = gsub("[0-9]", "", region)
+  )
+
+counts_broad$region <- factor(
+  counts_broad$region,
+  levels = c("Normal", "PanIN", "TumorEdge", "TumorCore", "LymphoidAggregate")
+)
+```
+
+```{r}
+# Lymphoid Aggregate Counts
+
+lymphoid_aggregate_spatial$region <- gsub("[0-9]", "", lymphoid_aggregate_spatial$region)
+lymphoid_aggregate_rows <- lymphoid_aggregate_spatial[lymphoid_aggregate_spatial$region == "LymphoidAggregate", ]
+
+la_counts <- counts[counts$region == "LymphoidAggregate", ]
+
+la_counts$lymphoid_aggregate_class <- NA
+
+# Match ImageId with sample_id and add lymphoid_aggregate_class
+for (i in 1:nrow(la_counts)) {
+  match_row <- lymphoid_aggregate_rows$sample_id == la_counts$ImageId[i]
+  if (any(match_row)) {
+    la_counts$lymphoid_aggregate_class[i] <- lymphoid_aggregate_rows$lymphoid_aggregate_class[match_row]
+  }
+}
+
+la_counts_comb <- la_counts %>%
+  group_by(ImageId, lymphoid_aggregate_class) %>%
+  summarise(total_cell_count = sum(cell_count, na.rm = TRUE)) %>%
+  ungroup()
+
+# Step 2: Merge with the areas data frame to get the area for each ImageId
+la_counts_comb <- la_counts_comb %>%
+  left_join(areas, by = "ImageId")
+
+# Step 3: Calculate density (cells per unit area)
+la_counts_comb <- la_counts_comb %>%
+  mutate(
+    total_cell_count = as.numeric(total_cell_count),
+    ROI_area = as.numeric(ROI_area),
+    density = total_cell_count / ROI_area,  # Result will be in float format
+    region = gsub("[0-9]", "", region)
+  )
+
+# View the final la_counts_comb data frame
+print(la_counts_comb)
+```
+
+```{r}
+# Significance Star Plotting Function
+
+plot_boxplot_stars <- function(data, title, filename, palette = NULL) {
+  region_comp <- list(c("Normal", "PanIN"), c("Normal", "TumorEdge"), c("Normal", "TumorCore"), 
+                      c("PanIN", "TumorEdge"), c("PanIN", "TumorCore"))
+
+  p <- ggplot(data, aes(x = region, y = densities * 1000000, fill = region)) +
+    geom_boxplot(outlier.shape = NA, lwd = 0.5) +
+    geom_jitter(width = 0.2) +
+    scale_shape_manual(values = c(1:10, 1:18, 1:8)) +
+    ylab(expression(paste("cells/mm", "\u00B2"))) +
+    ggtitle(title) +
+    theme(
+      axis.text.x = element_text(angle = 45, color = "black", hjust = 1, size = 10, face = "bold"),
+      axis.text.y = element_text(size = 10, color = "black", face = "bold"),
+      axis.title.x = element_blank(),
+      axis.line.x = element_line(size = 0.25, color = "black"),
+      axis.line.y = element_line(size = 0.25, color = "black"),
+      axis.ticks.x = element_line(size = 0.25),
+      axis.title.y = element_text(size = 12, color = "black", face = "bold"),
+      panel.background = element_rect(fill = "white"),
+      plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
+      legend.position = "none"
+    ) +
+    stat_compare_means(
+      comparisons = region_comp,
+      method = "wilcox.test",
+      label = "p.signif",
+      tip.length = 0,
+      bracket.size = 0.5,
+      size = 3
+    )
+  if(!is.null(palette)){
+    p <- p + scale_fill_manual(values = palette)
+  }
+
+  ggsave(filename = filename, plot = p, width = 4, height = 5, dpi = 300)
+  print(p)
+}
+```
+
+```{r}
+plot_boxplot_pvalues <- function(data, title, filename, palette = NULL) {
+  region_comp <- list(c("Normal", "PanIN"), c("Normal", "TumorEdge"), c("Normal", "TumorCore"), 
+                      c("PanIN", "TumorEdge"), c("PanIN", "TumorCore"))
+
+  p <- ggplot(data, aes(x = region, y = densities * 1000000, fill = region)) +
+    geom_boxplot(outlier.shape = NA, lwd = 0.5) +
+    geom_jitter(width = 0.2) +
+    scale_shape_manual(values = c(1:10, 1:18, 1:8)) +
+    ylab(expression(paste("cells/mm", "\u00B2"))) +
+    ggtitle(title) +
+    theme(
+      axis.text.x = element_text(angle = 45, color = "black", hjust = 1, size = 10, face = "bold"),
+      axis.text.y = element_text(size = 10, color = "black", face = "bold"),
+      axis.title.x = element_blank(),
+      axis.line.x = element_line(size = 0.25, color = "black"),
+      axis.line.y = element_line(size = 0.25, color = "black"),
+      axis.ticks.x = element_line(size = 0.25),
+      axis.title.y = element_text(size = 12, color = "black", face = "bold"),
+      panel.background = element_rect(fill = "white"),
+      plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
+      legend.position = "none"
+    ) +
+    stat_compare_means(
+      comparisons = region_comp,
+      method = "wilcox.test",
+      label = "p.format",
+      tip.length = 0,
+      bracket.size = 0.5,
+      size = 3
+    )
+  if(!is.null(palette)){
+    p <- p + scale_fill_manual(values = palette)
+  }
+
+  ggsave(filename = filename, plot = p, width = 4, height = 5, dpi = 300)
+  print(p)
+}
+```
+
+```{r}
+# specify color palette
+panin_pal <- c(
+  "Normal" = "#FF6F6F", 
+  "PanIN" = "#6EAE31", 
+  "TumorEdge" = "#00C2C3", 
+  "TumorCore" = "#4FAEF0", 
+  "LymphoidAggregate" = "#D27CF8"
+)
+
+# Broad T cells
+plot_boxplot_stars(counts_broad, "T Cells", "figures/03_A_tcell_analysis/alltcell_boxplot_sigstars.pdf", panin_pal)
+plot_boxplot_pvalues(counts_broad, "T Cells", "figures/03_A_tcell_analysis/alltcell_boxplot_pvalue.pdf", panin_pal)
+
+# CD4_T helper cells
+cd4_thelp_data <- counts[counts$immune_cluster_specific == "CD4_Th", ]
+plot_boxplot_stars(cd4_thelp_data, "CD4_Th Cells", "figures/03_A_tcell_analysis/CD4_Th_boxplotstars.pdf", panin_pal)
+plot_boxplot_pvalues(cd4_thelp_data, "CD4_Th Cells", "figures/03_A_tcell_analysis/CD4_Th_boxplotpvalues.pdf", panin_pal)
+
+# CD4_Treg cells
+cd4_treg_data <- counts[counts$immune_cluster_specific == "CD4_Treg", ]
+plot_boxplot_stars(cd4_treg_data, "CD4_Treg Cells", "figures/03_A_tcell_analysis/CD4_Treg_boxplotstars.pdf", panin_pal)
+plot_boxplot_pvalues(cd4_treg_data, "CD4_Treg Cells", "figures/03_A_tcell_analysis/CD4_Treg_boxplotpvalues.pdf", panin_pal)
+
+# CD8_Tcell cells
+cd8_tcell_data <- counts[counts$immune_cluster_specific == "CD8_Tcell", ]
+plot_boxplot_stars(cd8_tcell_data, "CD8 T Cells", "figures/03_A_tcell_analysis/CD8_Tcell_boxplotstars.pdf", panin_pal)
+plot_boxplot_pvalues(cd8_tcell_data, "CD8 T Cells", "figures/03_A_tcell_analysis/CD8_Tcell_boxplotpvalues.pdf", panin_pal)
+```
+
+```{r}
+# create plots excluding the lymphoid aggregate category
+counts_broad_noLA <- counts_broad[counts_broad$region != "LymphoidAggregate",]
+
+# T cells
+plot_boxplot_pvalues(counts_broad_noLA, "T Cells", "figures/03_A_tcell_analysis/alltcell_noLA_boxplot_pvalue.pdf", panin_pal)
+
+# CD4_Treg cells
+cd4_treg_data <- counts[
+  counts$immune_cluster_specific == "CD4_Treg" &
+    counts$region != "LymphoidAggregate", 
+]
+plot_boxplot_pvalues(cd4_treg_data, "CD4_Treg Cells", "figures/03_A_tcell_analysis/CD4_Treg_noLA_boxplotpvalues.pdf", panin_pal)
+
+# CD8_Tcell cells
+cd8_tcell_data <- counts[
+  counts$immune_cluster_specific == "CD8_Tcell" &
+    counts$region != "LymphoidAggregate", 
+]
+plot_boxplot_pvalues(cd8_tcell_data, "CD8 T Cells", "figures/03_A_tcell_analysis/CD8_Tcell_noLA_boxplotpvalues.pdf", panin_pal)
+```
+
+```{r}
+# lymphoid aggregate comparison
+LA_palette <- c(
+  "PanIN_adjacent" = "#6EAE31", 
+  "PDAC_adjacent" = "#00C2C3"
+)
+
+lymphoid_aggregate_spatial$region <- gsub("[0-9]", "", lymphoid_aggregate_spatial$region)
+lymphoid_aggregate_rows <- lymphoid_aggregate_spatial[lymphoid_aggregate_spatial$region == "LymphoidAggregate", ]
+
+# Import Lymphoid Aggregate metadata
+lymphoid_aggregate_spatial <- read.csv("processed_data/01_IMC_metadata_annotation/sample_metadata.csv", row.names = 1)
+
+la_counts <- counts[counts$region == "LymphoidAggregate", ]
+
+la_counts$lymphoid_aggregate_class <- NA
+
+# Match ImageId with sample_id and add lymphoid_aggregate_class
+for (i in 1:nrow(la_counts)) {
+  match_row <- lymphoid_aggregate_rows$sample_id == la_counts$ImageId[i]
+  if (any(match_row)) {
+    la_counts$lymphoid_aggregate_class[i] <- lymphoid_aggregate_rows$lymphoid_aggregate_class[match_row]
+  }
+}
+
+la_counts_comb <- la_counts %>%
+  group_by(ImageId, lymphoid_aggregate_class) %>%
+  summarise(total_cell_count = sum(cell_count, na.rm = TRUE)) %>%
+  ungroup()
+
+# Merge with the areas data frame to get the area for each ImageId
+la_counts_comb <- la_counts_comb %>%
+  left_join(areas, by = "ImageId")
+
+# Calculate density
+la_counts_comb <- la_counts_comb %>%
+  mutate(
+    total_cell_count = as.numeric(total_cell_count),
+    ROI_area = as.numeric(ROI_area),
+    density = total_cell_count / ROI_area,  # Result will be in float format
+    region = gsub("[0-9]", "", region)
+  )
+
+# plot T cell density comparison
+
+# compare T reg density
+
+la_cd4_treg <- la_counts[la_counts$immune_cluster_specific == "CD4_Treg",]
+
+region_comp <- list(c("PanIN_adjacent", "PDAC_adjacent"))
+
+la_cd4treg_ggpt <- ggplot(la_cd4_treg, aes(x = lymphoid_aggregate_class, y = densities * 1000000, fill = lymphoid_aggregate_class)) +
+  geom_boxplot(outlier.shape = NA, lwd = 0.5) +
+  geom_jitter(width = 0.2) +
+  scale_shape_manual(values = c(1:10, 1:18, 1:8)) +
+  ylab(expression(paste("cells/mm", "\u00B2"))) +
+  ggtitle("Lymphoid Aggregate CD4 Treg Cells") +
+  scale_y_continuous(
+    expand = c(0, 0), 
+    limits = c(0, max(la_cd4_treg$densities * 1000000) + 1000)
+  ) +
+  scale_fill_manual(values = LA_palette) +
+  theme(
+    axis.text.x = element_text(angle = 45, color = "black", hjust = 1, size = 10, face = "bold"),
+    axis.text.y = element_text(size = 10, color = "black", face = "bold"),
+    axis.title.x = element_blank(),
+    axis.line.x = element_line(size = 0.25, color = "black"),
+    axis.line.y = element_line(size = 0.25, color = "black"),
+    axis.ticks.x = element_line(size = 0.25),
+    axis.title.y = element_text(size = 12, color = "black", face = "bold"),
+    panel.background = element_rect(fill = "white"),
+    plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
+    legend.position = "none"
+  ) +
+  stat_compare_means(
+    comparisons = region_comp,
+    method = "wilcox.test",
+    label = "p.format",
+    tip.length = 0,
+    bracket.size = 0.5,
+    size = 3
+  )
+  
+ggsave(
+  filename = "figures/03_A_tcell_analysis/LA_spatial_Treg_boxplotpvalue.pdf", 
+  plot = la_cd4treg_ggpt, 
+  width = 4, height = 5, dpi = 300
+)
+
+```
+
+```{r}
+# comparison of functional marker expression among T cells across lesion types
+cell_meta$region <- gsub("\\d$", "", cell_meta$region)
+cell_meta <- as.data.frame(cell_meta)
+
+# cd8_meta <- cell_meta[ cell_meta$immune_cluster_specific == "CD8_Tcell" & !(is.na(cell_meta$immune_cluster_specific)),]
+# treg_meta <- cell_meta[cell_meta$immune_cluster_specific == "CD4_Treg" & !(is.na(cell_meta$immune_cluster_specific)),]
+# cd4h_meta <- cell_meta[cell_meta$immune_cluster_specific == "CD4_Th" & !(is.na(cell_meta$immune_cluster_specific)),]
+
+tcell_meta <- cell_meta[
+  cell_meta$immune_cluster_specific %in% c("CD8_Tcell", "CD4_Treg", "CD4_Th") &
+    !(is.na(cell_meta$immune_cluster_specific)),
+]
+
+functional_markers <- c("PD1", "PDL1", "GZMB", "TCF1", "TOX")
+
+for(i in seq_along(functional_markers)){
+  m <- functional_markers[i]
+  pl <- ggplot(tcell_meta, aes(x = region, y = .data[[m]])) +
+    geom_violin() +
+    geom_jitter(width = 0.05, height = 0) +
+    facet_grid(~ immune_cluster_specific) +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1))
+  print(pl)
+  ggsave(
+    plot = pl,
+    filename = paste0(figure_dir, "/", "Tcell_functional_marker_expression_", m, ".pdf"),
+    width = unit(12, "in"), height = unit(6, "in")
+  )
+}
+
+# single plot of PD1 expression in CD8 T cells
+
+## test for differential expression by wilcoxon rank-sum test
+IMC_features <- colnames(tcell_meta)[15:ncol(tcell_meta)]
+names(IMC_features) <- IMC_features
+
+wilcox_test_IMC <- function(df, feature, group.by, ident.1, ident.2){
+  i1_imc <- df[df[[group.by]] == ident.1, feature]
+  i2_imc <- df[df[[group.by]] == ident.2, feature]
+  
+  y <- wilcox.test(x = i1_imc, y = i2_imc)
+  return(y)
+}
+
+wrap_differential_test <- function(df, features, group.by, ident.1, ident.2){
+  if(is.null(names(features))){
+    names(features) <- features
+  }
+  
+  test_ls <- lapply(features, function(x){
+    res <- wilcox_test_IMC(
+      df = df, feature = x,
+      group.by = group.by, ident.1 = ident.1, ident.2 = ident.2
+    )
+    res$parameter <- "non-para"
+    return(res)
+  })
+  test_df <- data.frame(do.call(rbind, test_ls))
+  for(i in seq(ncol(test_df))){
+    test_df[, i] <- unlist(test_df[, i])
+  }
+  test_df$feature <- rownames(test_df)
+  
+  # test_df$p.value <- unlist(test_df$p.value)
+  # FDR-adjustment of test p-values
+  test_df$p.adj <- p.adjust(test_df$p.value, method = "fdr")
+  return(test_df)
+}
+
+# list to compile T cell differential testing
+DE_result_ls <- list()
+
+# CD8 T cells
+cd8Tcell_meta <- tcell_meta[tcell_meta$immune_cluster_specific == "CD8_Tcell",]
+
+DE_result_ls[["CD8_Tcell_PanIN_v_TumorEdge"]] <- wrap_differential_test(
+  cd8Tcell_meta, features = IMC_features, 
+  group.by = "region", ident.1 = "PanIN", ident.2 = "TumorEdge"
+)
+DE_result_ls[["CD8_Tcell_PanIN_v_TumorCore"]] <- wrap_differential_test(
+  cd8Tcell_meta, features = IMC_features, 
+  group.by = "region", ident.1 = "PanIN", ident.2 = "TumorCore"
+)
+DE_result_ls[["CD8_Tcell_PanIN_v_LymphoidAggregate"]] <- wrap_differential_test(
+  cd8Tcell_meta, features = IMC_features, 
+  group.by = "region", ident.1 = "PanIN", ident.2 = "LymphoidAggregate"
+)
+DE_result_ls[["CD8_Tcell_TumorEdge_v_TumorCore"]] <- wrap_differential_test(
+  cd8Tcell_meta, features = IMC_features, 
+  group.by = "region", ident.1 = "TumorEdge", ident.2 = "TumorCore"
+)
+# no comparison to normal due to abscence of CD8 T cells
+# cd8_T_PanINvNrm <- wrap_differential_test(
+#   cd8Tcell_meta, features = IMC_features, 
+#   group.by = "region", ident.1 = "PanIN", ident.2 = "Normal"
+# )
+
+# CD4 T helper
+cd4Thelp_meta <- tcell_meta[tcell_meta$immune_cluster_specific == "CD4_Th",]
+
+DE_result_ls[["CD4_Th_PanIN_v_TumorEdge"]] <- wrap_differential_test(
+  cd4Thelp_meta, features = IMC_features, 
+  group.by = "region", ident.1 = "PanIN", ident.2 = "TumorEdge"
+)
+DE_result_ls[["CD4_Th_PanIN_v_TumorCore"]] <- wrap_differential_test(
+  cd4Thelp_meta, features = IMC_features, 
+  group.by = "region", ident.1 = "PanIN", ident.2 = "TumorCore"
+)
+DE_result_ls[["CD4_Th_PanIN_v_LymphoidAggregate"]] <- wrap_differential_test(
+  cd4Thelp_meta, features = IMC_features, 
+  group.by = "region", ident.1 = "PanIN", ident.2 = "LymphoidAggregate"
+)
+DE_result_ls[["CD4_Th_PanIN_v_Normal"]] <- wrap_differential_test(
+  cd4Thelp_meta, features = IMC_features, 
+  group.by = "region", ident.1 = "PanIN", ident.2 = "Normal"
+)
+DE_result_ls[["CD4_Th_TumorEdge_v_TumorCore"]] <- wrap_differential_test(
+  cd4Thelp_meta, features = IMC_features, 
+  group.by = "region", ident.1 = "TumorEdge", ident.2 = "TumorCore"
+)
+
+# CD4 Treg
+cd4Treg_meta <- tcell_meta[tcell_meta$immune_cluster_specific == "CD4_Treg",]
+
+DE_result_ls[["CD4_Treg_PanIN_v_TumorEdge"]] <- wrap_differential_test(
+  cd4Treg_meta, features = IMC_features, 
+  group.by = "region", ident.1 = "PanIN", ident.2 = "TumorEdge"
+)
+DE_result_ls[["CD4_Treg_PanIN_v_TumorCore"]] <- wrap_differential_test(
+  cd4Treg_meta, features = IMC_features, 
+  group.by = "region", ident.1 = "PanIN", ident.2 = "TumorCore"
+)
+DE_result_ls[["CD4_Treg_PanIN_v_LymphoidAggregate"]] <- wrap_differential_test(
+  cd4Treg_meta, features = IMC_features, 
+  group.by = "region", ident.1 = "PanIN", ident.2 = "LymphoidAggregate"
+)
+DE_result_ls[["CD4_Treg_PanIN_v_Normal"]] <- wrap_differential_test(
+  cd4Treg_meta, features = IMC_features, 
+  group.by = "region", ident.1 = "PanIN", ident.2 = "Normal"
+)
+DE_result_ls[["CD4_Treg_TumorEdge_v_TumorCore"]] <- wrap_differential_test(
+  cd4Treg_meta, features = IMC_features, 
+  group.by = "region", ident.1 = "TumorEdge", ident.2 = "TumorCore"
+)
+
+# save all results
+for(i in seq_along(DE_result_ls)){
+  nm <- names(DE_result_ls)[i]
+  write.csv(
+    DE_result_ls[[nm]], 
+    file = paste0(
+      result_dir, "/", "DifferentialProteinExpression", "_", 
+      "NormalizedIMC", "_", "WilcoxTest", "_", nm, ".csv"
+    )
+  )
+}
+
+# representative PD1 plot for CD8 T cells
+
+cd8Tcell_meta_nonLA <- cd8Tcell_meta[cd8Tcell_meta$region != "LymphoidAggregate",]
+
+cd8Tcell_meta_nonLA$region <- factor(
+  cd8Tcell_meta_nonLA$region,
+  levels = c("PanIN", "TumorEdge", "TumorCore")
+)
+
+pd1_pl <- ggplot(cd8Tcell_meta_nonLA, aes(x = region, y = PD1, fill = region)) +
+  geom_violin() +
+  geom_jitter(width = 0.05, height = 0) +
+  theme(
+    axis.text.x = element_text(angle = 45, color = "black", hjust = 1, size = 10, face = "bold"),
+    axis.text.y = element_text(size = 10, color = "black", face = "bold"),
+    axis.title.x = element_blank(),
+    axis.line.x = element_line(size = 0.25, color = "black"),
+    axis.line.y = element_line(size = 0.25, color = "black"),
+    axis.ticks.x = element_line(size = 0.25),
+    axis.title.y = element_text(size = 12, color = "black", face = "bold"),
+    panel.background = element_rect(fill = "white"),
+    plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
+    legend.position = "none"
+  ) +
+  ylim(c(0,3)) +
+  ylab("PD1 (Normalized Expression)") +
+  ggtitle("Non-Aggregate CD8 T cells") +
+  scale_fill_manual(
+    values = c(
+      "PanIN" = "#6EAE31",
+      "TumorEdge" = "#00C2C3",
+      "TumorCore" = "#4FAEF0"
+    )
+  )
+print(pd1_pl)
+ggsave(
+  plot = pd1_pl,
+  file = paste0(figure_dir, "/", "PD1", "_", "CD8_Tcell", "_", "NormalizedExpression.pdf"),
+  width = unit(4, "in"), height = unit(5, "in")
+)
+
+# counts of T cells proximal to each lesion type
+table(tcell_meta$region, tcell_meta$immune_cluster_specific)
+```
+
+

@@ -1,0 +1,191 @@
+---
+title: "02_A_broad_cell_clustering"
+author: "Jacob Mitchell"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(plyr)
+library(dplyr)
+library(matrixStats)
+library(Rphenograph)
+library(dittoSeq)
+library(pals)
+library(ComplexHeatmap)
+
+set.seed(123)
+sessionInfo()
+```
+
+```{r functions}
+plot_imc_violin <- function(df, group.by, feature) {
+  pl <- ggplot(df, aes(x = .data[[group.by]], y = .data[[feature]])) +
+    geom_violin(aes(fill = .data[[group.by]]), scale = "width") +
+    stat_summary(fun = "median", shape = 1, size = 0.3, color = "#000000") +
+    scale_fill_manual(values = colorassigned) +
+    theme_bw() +
+    theme(legend.position = "none")
+  
+  return(pl)
+}
+```
+
+```{r}
+result_dir <- "processed_data/02_A_broad_cell_clustering"
+if(!dir.exists(result_dir)) dir.create(result_dir)
+figure_dir <- "figures/02_A_broad_cell_clustering"
+if(!dir.exists(figure_dir)) dir.create(figure_dir)
+```
+
+```{r}
+data_dir <- "processed_data/01_IMC_metadata_annotation/"
+
+# load sample meta data
+md <- read.csv(paste0(data_dir, "/sample_metadata.csv"), row.names = 1)
+# load raw IMC values
+csv_raw_full <- read.csv(paste0(data_dir, "/raw_IMC.csv"), row.names = 1)
+
+# load cleaned panel annotations
+cleanpanel <- read.csv(paste0(data_dir, "/cleanpanel.csv"))
+
+# update feature names to clean names; subset to analysis features
+# colnames(csv_raw_full) <- cleanpanel$clean_names
+# use mapvalues to ensure no order mismatches occur
+colnames(csv_raw_full) <- plyr::mapvalues(
+  colnames(csv_raw_full), 
+  from = cleanpanel$original_names, to = cleanpanel$clean_names
+)
+
+panel <- cleanpanel$clean_names[cleanpanel$analysis > 0]
+csv_full <- csv_raw_full[,colnames(csv_raw_full) %in% panel]
+```
+
+```{r}
+#sort panels into different categories
+subtype_markers <- cleanpanel$clean_names[cleanpanel$subtype == 1]
+functional_markers <- cleanpanel$clean_names[cleanpanel$functional == 1]
+otherparameters <- cleanpanel$clean_names[cleanpanel$other ==1]
+cluster_by <- cleanpanel$clean_names[cleanpanel$cluster_by == 1]
+Thmarkers <- cleanpanel$clean_names[cleanpanel$t_helper == 1]
+Tcmarkers <- cleanpanel$clean_names[cleanpanel$t_cytotoxic == 1]
+Tfmarkers <- cleanpanel$clean_names[cleanpanel$t_folicular == 1]
+Bmarkers <- cleanpanel$clean_names[cleanpanel$b_cell == 1]
+DCmarkers <- cleanpanel$clean_names[cleanpanel$dendritic == 1]
+Macmarkers <- cleanpanel$clean_names[cleanpanel$mac == 1]
+Stromamarkers <- cleanpanel$clean_names[cleanpanel$stroma == 1]
+```
+
+```{r}
+# Cluster heatmap for unannotated clusters======
+data_full <- csv_full
+data <- data.matrix(csv_full)
+data <- asinh(data[, union(subtype_markers,functional_markers)] / 0.8)
+```
+
+```{r}
+#phenograph clustering of data
+rng <- colQuantiles(data, probs = c(0.01, 0.99))
+data01 <- t((t(data) - rng[, 1]) / (rng[, 2] - rng[, 1]))
+data01[data01 < 0] <- 0
+data01[data01 > 1] <- 1
+data01 <- data01[, union(subtype_markers,functional_markers)]
+
+set.seed(1234)
+phenographout <- Rphenograph(data01)
+data_full$cluster <- factor(membership(phenographout[[2]]))
+```
+
+```{r}
+cell_meta <- data.frame(
+  cell = rownames(data_full),
+  ImageId = csv_raw_full$sample_id,
+  CellId = csv_raw_full$CellId,
+  cluster = data_full$cluster
+)
+```
+
+```{r}
+cluster_mean <- data.frame(data01, cluster = data_full$cluster, check.names = FALSE) %>%
+  group_by(cluster) %>% 
+  dplyr::summarize_all(list(mean))
+
+cluster_mean_mat <- as.matrix(cluster_mean[, union(subtype_markers,functional_markers)])
+
+rownames(cluster_mean_mat) <- 1:nrow(cluster_mean_mat)
+
+cluster_scaled <- scale(cluster_mean_mat)
+
+rownames(cluster_scaled) <- 1:nrow(cluster_scaled)
+```
+
+```{r}
+# save results
+saveRDS(phenographout, file = paste0(result_dir, "/IMC_phenograph.rds"))
+saveRDS(data_full, file = paste0(result_dir, "/IMC_clustered.rds"))
+saveRDS(data, file = paste0(result_dir, "/IMC_arcsinh.rds"))
+saveRDS(data01, file = paste0(result_dir, "/IMC_normalized.rds"))
+
+# cell meta data with cluster assignment
+write.csv(cell_meta, file = paste0(result_dir, "/cell_meta.csv"))
+
+# matrices used to render heatmaps
+write.csv(cluster_mean_mat, file = paste0(result_dir, "/IMCcluster_mean.csv"))
+write.csv(cluster_scaled, file = paste0(result_dir, "/IMCcluster_scaledMean.csv"))
+```
+
+```{r}
+# create cluster summary heatmaps
+n_levels <- nlevels(data_full$cluster)
+ditto_cols <- dittoSeq::dittoColors(1)
+
+# colors for the heatmap
+legend_breaks <- seq(from = 0, to = 1, by = 0.2)
+colorassigned <- setNames(
+  ditto_cols[seq_along(unique(cluster_mean$cluster))],
+  sort(unique(cluster_mean$cluster))
+)
+color_list <- list(clusters=colorassigned)
+color_list_byoriginal <- colorassigned[match((cluster_mean$cluster),names(colorassigned))]
+
+rAbar <- rowAnnotation(
+  clusters=cluster_mean$cluster,
+  col=color_list, gp = gpar(col = "white", lwd = .5),
+  counts= anno_barplot(
+    as.vector(table(data_full$cluster)), gp = gpar(fill=colorassigned),
+    border = F, bar_width = 0.75, width = unit(2,"cm")
+  )
+)
+
+pdf(paste0(figure_dir, "/", "clusterheatmap.pdf"),width=10,height=8)
+Heatmap(
+  cluster_scaled,
+  column_title="Phenograph Clusters", name = "scaled",
+  col=rev(brewer.rdbu(100)), cluster_columns = T, cluster_rows = T,
+  border = NA, rect_gp = gpar(col = "white", lwd = .5), right_annotation = rAbar,
+  show_row_names = T, row_names_gp = gpar(fontsize=7), column_names_gp = gpar(fontsize=10),
+  heatmap_legend_param = list(at=seq(from = round(min(cluster_scaled)), to = round(max(cluster_scaled)))),
+  width = ncol(cluster_scaled)*unit(4, "mm"), height = nrow(cluster_scaled)*unit(4, "mm")
+)
+dev.off() 
+```
+
+```{r}
+cell_features <- colnames(cluster_scaled)
+for(i in seq_along(cell_features)){
+  feat <- cell_features[i]
+  pl <- plot_imc_violin(
+    df = data_full, feature = feat, group.by = "cluster"
+  )
+  print(pl)
+  ggsave(
+    plot = pl, filename = paste0(figure_dir, "/", "vln_", "cluster", "_", feat, ".png"),
+    dpi = 300, width = unit(8, "in"), height = unit(6, "in")
+  )
+}
+```
+

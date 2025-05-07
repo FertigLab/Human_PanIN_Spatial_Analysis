@@ -1,0 +1,155 @@
+---
+title: "01_IMC_metadata_annotation"
+author: "Jacob Mitchell"
+date: "`r Sys.Date()`"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+library(plyr)
+
+set.seed(123)
+sessionInfo()
+```
+
+```{r}
+dataDirectory <- "data"
+result_dir <- "processed_data/01_IMC_metadata_annotation"
+if(!dir.exists(result_dir)) dir.create(result_dir)
+```
+
+```{r}
+# meta data
+csv_files <- list.files(dataDirectory, pattern = "\\.csv$")
+
+md <- data.frame(
+  file_name = csv_files,
+  sample_id = gsub(".csv$", "", csv_files),
+  file_order = seq_along(csv_files)
+)
+```
+
+```{r}
+sample_id_split <- strsplit(md$sample_id, "_")
+md$timepoint <- sapply(sample_id_split, function(x) x[[1]])
+md$slide_id <- sapply(sample_id_split, function(x) x[[2]])
+md$ROI <- sapply(sample_id_split, function(x) x[[3]])
+md$region <- sapply(sample_id_split, function(x) x[[4]])
+
+##input image id into metadata
+image_id<-c()
+for (i in 1:length(md$file_name)){
+  tempfile <- read.csv(paste0(dataDirectory,"/",md$file_name[i]))
+  df <- as.data.frame(cbind(paste0(md$file_name[i]), unique(tempfile$ImageId)))
+  image_id <- rbind(image_id,df)
+}
+
+# md$ImageId <- image_id$V2[match(image_id$V1,md$file_name)]
+
+md$ImageId <- plyr::mapvalues(md$file_name, from = image_id$V1, to = image_id$V2)
+```
+
+```{r}
+## Make sure all files in metadata present in data directory
+if(!all(md$file_name %in% list.files(dataDirectory)[grep(list.files(dataDirectory),pattern = '.csv')])){
+  print(
+    paste(
+      'ERR: not all filenames in metadata present in data folder - missing',
+      md$file_name[!which(data$file_name %in% list.files(dataDirectory)[grep(list.files(dataDirectory), pattern = '.csv')])],
+      'Subsetting...'
+    )
+  )
+  md <- md[-c(!which(md$file_name %in% list.files(dataDirectory)[grep(list.files(dataDirectory),pattern = '.csv')])),]
+}
+```
+
+```{r}
+## Read csv into csv_raw =========
+csv_raw <- lapply(paste0(dataDirectory,"/",md$file_name),read.csv)
+names(csv_raw) <- md$sample_id
+csv_raw_full <- plyr::ldply(csv_raw, rbind)
+colnames(csv_raw_full)[colnames(csv_raw_full) == ".id"] <- "sample_id"
+
+# ensure rownames sample ids pasted to cell id
+rownames(csv_raw_full) <- paste0(csv_raw_full$sample_id, "-", csv_raw_full$CellId)
+
+
+
+# csv_raw_full <- do.call(rbind, csv_raw)
+# lapply(csv_raw, function(x) {
+#   res <- list()
+#   res[["ImageId"]] <- unique(x[["ImageId"]])
+#   res[["ImageId"]] <- unique(x[["ImageId"]])
+# })
+# csv_raw_full$ImageId <- md$sample_id[match(csv_raw_full$ImageId,md$ImageId)]
+
+#export raw channel names to clean/rename panel + rename ImageId as sample_id
+rawcolnames <- c()
+rawcolnames$name <- colnames(csv_raw_full)
+rawcolnames$sum <- apply( csv_raw_full, 2, FUN = function(x) {sum(as.numeric(x))})
+```
+
+```{r}
+## annotate lymphoid aggregates as proximal to PanIN or PDAC
+lymphoid_roi <- md[grepl("LymphoidAggregate", md$region),]
+lymphoid_slides <- unique(lymphoid_roi$slide_id)
+slide_PanIN_chk <- vapply(
+  lymphoid_slides, FUN.VALUE = logical(1), FUN = function(slide) {
+    slide_md <- md[md$slide_id == slide,]
+    chk <- sum(grepl("PanIN", slide_md$region))
+    if(chk){
+      return(TRUE)
+    } else {
+      return(FALSE)
+    }
+  }
+)
+
+slide_PDAC_chk <- vapply(
+  lymphoid_slides, FUN.VALUE = logical(1), FUN = function(slide) {
+    slide_md <- md[md$slide_id == slide,]
+    chk <- sum(grepl("TumorEdge", slide_md$region) | grepl("TumorCore", slide_md$region))
+    if(chk){
+      return(TRUE)
+    } else {
+      return(FALSE)
+    }
+  }
+)
+
+lymphoid_md <- data.frame(
+  slide = lymphoid_slides,
+  PanIN_adj = slide_PanIN_chk,
+  PDAC_adj = slide_PDAC_chk
+)
+
+lymphoid_md$aggregate_type <- ifelse(
+  lymphoid_md$PanIN_adj & !lymphoid_md$PDAC_adj, "PanIN_adjacent", "PDAC_adjacent"
+)
+
+md$lymphoid_aggregate_class <- apply(
+  md, MARGIN = 1, FUN = function(x) {
+    if(grepl("LymphoidAggregate", x[["region"]])){
+      sl <- x[["slide_id"]]
+      lymphoid_class <- lymphoid_md[lymphoid_md$slide == sl, "aggregate_type"]
+      return(lymphoid_class)
+    } else {
+      return(NA)
+    }
+  }
+)
+```
+
+```{r}
+write.csv(rawcolnames, file = paste0(result_dir, "/", "rawpanel.csv"))
+
+# save sample metadata table
+write.csv(md, paste0(result_dir, "/", "sample_metadata.csv"))
+
+# save merged raw expression values
+write.csv(csv_raw_full, paste0(result_dir, "/", "raw_IMC.csv"))
+```
